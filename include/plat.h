@@ -9,6 +9,9 @@
  * framebuffer on the host) and gfx.c on top. */
 #pragma once
 #include <stdint.h>
+#ifndef BOARD_SMK37
+#define BOARD_SMK37 0                  /* the board: 0 the FM-1, 1 the M-VAVE SMK-37 (the build's BOARD=smk37) */
+#endif
 
 /* big zero-initialised buffers go in the .pool RAM region on the device */
 #ifdef PLAT_HOST
@@ -45,6 +48,29 @@ void plat_lights(uint32_t buttons, uint32_t keys, uint32_t dim_buttons, uint32_t
 void plat_leds(uint32_t buttons, uint32_t keys);
 void plat_glow(int on);
 void plat_play_red(int red);
+
+#if BOARD_SMK37
+/* The M-VAVE SMK-37 (BOARD_SMK37): what it has beyond the FM-1's panel. The FM-1's controls are as above, by their
+ * printed labels (B_*, EN_*: K2..K8; K1 is MASTER); NKEYS are its middle 27 keys, F3..G5. In addition: */
+#define PLAT_SMK37 1
+enum { SB_KNOB_BANK, SB_FADER_BANK, SB_LEFT, SB_RIGHT, NSB };   /* its own four buttons */
+#define NPADS 16                       /* pad p: 0..7 the top row, 8..15 the bottom row, left to right */
+#define NOUTER 10                      /* the outer keys: 0..4 C3 C#3 D3 D#3 E3 (below F3), 5..9 G#5 A5 A#5 B5 C6 */
+#define OUTER_NOTE_OFS(i) ((i) < 5 ? (i) - 5 : (i) - 5 + NKEYS)   /* outer key i as a key number from F3 (-5..31) */
+uint32_t plat_smk_buttons(void);       /* held: bit SB_* */
+uint32_t plat_key_vel(int k);          /* key k's (0..NKEYS - 1) velocity at its last press, 1..127, from the unit's
+                                        * own factory curves */
+int plat_pad(int *pad, int *vel);      /* the next pad hit (vel 1..127) or release (vel 0); 1 = got one */
+uint32_t plat_pads_held(void);         /* bit p: pad p held */
+int plat_outer(int *key, int *vel);    /* the next outer key (0..NOUTER - 1) press (vel 1..127) or release (0) */
+uint32_t plat_fader(int f);            /* fader f (0..3), 0..127, bottom 0 */
+int32_t plat_bend(void);               /* the pitch wheel, -8192..8191, 0 at rest (self-calibrating, a dead band) */
+uint32_t plat_modw(void);              /* the mod wheel, 0..127 */
+void plat_smk_leds(uint32_t lit);      /* the four buttons' LEDs: bit SB_* lit */
+void plat_pad_rgb(int pad, uint32_t rgb);   /* pad p's colour, 0xRRGGBB (sent between screen transfers) */
+#else
+#define PLAT_SMK37 0
+#endif
 
 /* MIDI: 4-byte USB-MIDI event packets (byte 0 = cable / CIN, then status, data 1, data 2). In from USB, the TRS jack
  * (in only: the FM-1 has no MIDI out jack) and Bluetooth (FM1B_BLE); out to USB and Bluetooth. */
@@ -136,12 +162,23 @@ void plat_log(const char *line);
  * from 0xF02), so in these two an app keeps bytes 0xF00..0xF07 of every sector erased (0xFF), or else makes sure
  * those bytes never read as a record: never "AT" at 0xF06 (LOOM-8's sample bank moves its data so, and refuses a
  * bank that has it) */
+#if BOARD_SMK37
+/* the SMK-37 (felucca-bsp chip/fm1_flash_smk37.h): the store in the stock VM 0x9D000..0xBAFFF (120 KiB), the big data
+ * in USRFLASH 0xC2000..0xE9FFF (160 KiB), no second window. Never the unit's calibration (0xC0000..0xC1FFF) */
+#define PLAT_DATA_LO 0x9D000u
+#define PLAT_DATA_HI 0xBB000u
+#define PLAT_XDATA0_LO 0xC2000u
+#define PLAT_XDATA0_HI 0xEA000u
+#define PLAT_XDATA1_LO 0xEA000u                /* (empty) */
+#define PLAT_XDATA1_HI 0xEA000u
+#else
 #define PLAT_DATA_LO 0x97000u
 #define PLAT_DATA_HI 0xE0000u
 #define PLAT_XDATA0_LO 0x93000u
 #define PLAT_XDATA0_HI 0x97000u
 #define PLAT_XDATA1_LO 0xE5000u
 #define PLAT_XDATA1_HI 0xFC000u
+#endif
 #define PLAT_DATA_OK(off, n) (plat_in((off), (n), PLAT_DATA_LO, PLAT_DATA_HI) || \
                               plat_in((off), (n), PLAT_XDATA0_LO, PLAT_XDATA0_HI) || \
                               plat_in((off), (n), PLAT_XDATA1_LO, PLAT_XDATA1_HI))

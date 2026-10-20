@@ -68,8 +68,9 @@ class FakeFM1:
     """a MIDI backend with one FM-1 on it"""
 
     def __init__(self, image, identity="FM-1_015", name="FM-1", unplug_after=None, after_write="FM-1_900",
-                 stall_after=None, bad_addr=None, refuse_arm=False):
+                 stall_after=None, bad_addr=None, refuse_arm=False, loader="ota-FM-1_900"):
         self.image, self.unplug_after, self.after_write = image, unplug_after, after_write
+        self.loader = loader                     # (the update loader's identity: an SMK's names its model)
         self.refuse_arm, self.armed, self.arms = refuse_arm, False, []
         self.stall_after, self.bad_addr = stall_after, bad_addr
         self.served = self.bad = self.upgrades = 0
@@ -131,7 +132,7 @@ class FakeFM1:
             if self.stall_after and self.served >= self.stall_after:
                 return
             if addr == I.FINISH_CHECK:
-                threading.Timer(0.05, self.boot, ("ota-FM-1_900", "Felucca Update")).start()
+                threading.Timer(0.05, self.boot, (self.loader, "Felucca Update")).start()
             elif addr == I.FINISH_WRITE:
                 threading.Timer(0.05, self.boot, (self.after_write, "Felucca")).start()
             else:
@@ -329,9 +330,35 @@ def against_js():
     ok(I.LOADER_MARK in raw, f"{clean.name} carries the Felucca loader marker")
 
 
+def smk37():
+    """the SMK-37 (BOARD_SMK37): a package installs only on its own model, on the running firmware and in update
+    mode alike; an FM-1 package never on an SMK, an SMK one never on an FM-1, a Pro one never on an Elite"""
+    pro = package("SMK-37 Pro_985")
+    p = pkgfile("smk.fwsc", pro)
+    dev = FakeFM1(I.logical_image(pro), identity="SMK-37 Pro_016", name="SMK-37 Pro", loader="ota-SMK-37 Pro_900",
+                  after_write="SMK-37 Pro_985")
+    rc, out, err = cli([p, "--yes"], dev)
+    ok(rc == 0 and dev.bad == 0 and dev.upgrades == 2 and "SMK-37 Pro_985" in out,
+       "SMK-37 Pro: stock -> loader -> the SMK package (its port found by its name)")
+    dev = FakeFM1(I.logical_image(pro), identity="ota-SMK-37 Pro_900", name="Felucca Update",
+                  after_write="SMK-37 Pro_985")
+    rc, out, err = cli([p, "--yes"], dev)
+    ok(rc == 0 and dev.upgrades == 1, "SMK-37 Pro in update mode: the write finished")
+    fm1 = package()
+    for what, raw, ident in (("an FM-1 package on an SMK-37 Pro", fm1, "SMK-37 Pro_016"),
+                             ("an FM-1 package on an SMK-37 loader", fm1, "ota-SMK-37 Pro_900"),
+                             ("an SMK package on an FM-1", pro, "FM-1_015"),
+                             ("an SMK package on an FM-1 loader", pro, "ota-FM-1_900"),
+                             ("a Pro package on an SMK-37 Elite", pro, "SMK-37 Elite_016")):
+        dev = FakeFM1(I.logical_image(raw), identity=ident, name="SMK-37 Pro")
+        rc, out, err = cli([pkgfile("x.fwsc", raw), "--yes"], dev)
+        ok(rc == 6 and dev.upgrades == 0 and dev.served == 0, f"refused, nothing sent: {what}")
+
+
 wire()
 installs()
 errors()
+smk37()
 from_open()
 against_js()
 shutil.rmtree(TMP, ignore_errors=True)

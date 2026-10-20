@@ -113,6 +113,12 @@ VERSION = None                      # APP_VERSION for release builds (default: "
 BLE = False                         # fm1.toml ble = true, unless --no-ble
 WIFI = False                        # fm1.toml wifi = true
 STEM = None                         # the build's file names: NAME, or NAME-usb (--no-ble)
+# the board (BOARD env or --board): fm1, or smk37 (the M-VAVE SMK-37: felucca-bsp boards/smk37); an SMK build carries its
+# model's name (MODEL env or --model: pro, elite, mke; one keyboard under three names), so the stock updater still
+# takes that unit's own factory package later. The FM-1 build gets no new flag
+BOARD = "fm1"
+MODELS = {"pro": "SMK-37 Pro", "elite": "SMK-37 Elite", "mke": "MKE-P37"}
+BOARD_DEFS = []
 BT_SYMS = ("btstack_init", "bt_ble_init", "bt_max_pwr_set", "le_controller_set_mac", "lmp_set_sniff_disable",
            "shim_os_init", "ble_midi_send_many")
 
@@ -273,7 +279,7 @@ def ldr_wrap(image):
 def build_loader():
     LDR.mkdir(parents=True, exist_ok=True)
     src = BSP / "loader"
-    flags = [*CFLAGS, *inc(BSP / "chip", BSP / "boards" / "fm1")]
+    flags = [*CFLAGS, *inc(BSP / "chip", BSP / "boards" / BOARD), *BOARD_DEFS]
     tc_all(("cc", "-c", src / "crt0_ldr.S", "-o", LDR / "crt0_ldr.o"),
            ("cc", *flags, "-c", src / "loader.c", "-o", LDR / "loader.o"))
     elf = LDR / "loader.elf"
@@ -427,7 +433,7 @@ def radio_units():
 
 
 def build_app():
-    flags = [*CFLAGS, *FPU, *inc(BSP / "chip", BSP / "boards" / "fm1", SRC / "device", SRC / "include", SRC / "lib", APP, GEN,
+    flags = [*CFLAGS, *FPU, *inc(BSP / "chip", BSP / "boards" / BOARD, SRC / "device", SRC / "include", SRC / "lib", APP, GEN,
                                  *(APP / d for d in CONF.get("include", []) + CONF.get("device_include", [])))]
     if BLE:
         flags += ["-DFM1B_BLE=1", *inc(SRC / "ble" / "shim")]
@@ -495,6 +501,12 @@ def build_app():
     lto = ["--plugin", "/opt/jieli/pi32v2/bin/LLVMgold.so" if use_docker() else str(toolchain() / "pi32v2/bin/LLVMgold.so"),
            "--plugin-opt=mcpu=r3", "--plugin-opt=-pi32v2-large-program=true"] if BLE or WIFI else []
     ld = SRC / "device" / ("app_wifi.ld" if WIFI else "app.ld")
+    if APP_SLOT != 0x8DFBC:                       # another board's app slot (the SMK-37): the same script, its XIP length
+        txt = ld.read_text()
+        if txt.count("LENGTH = 0x8DFBC") != 1:
+            raise SystemExit(f"{ld.name}: the XIP LENGTH line was not found")
+        ld = OUT / ld.name
+        ld.write_text(txt.replace("LENGTH = 0x8DFBC", f"LENGTH = {APP_SLOT:#x}"))
     tc("pi32v2/bin/ld", *lto, "--gc-sections", "-e", "_start", "-T", ld, *objs, *b_objs,
        *b_libs, "-o", elf)
     for sect in ("text.bin", "data.bin", "ramtext.bin"):
@@ -713,7 +725,8 @@ def o2_objects(cc, base_flags, out):
 def opt_flags():
     """the optional parts an fm1.toml turns on that need no SDK: the same on the device, the host and the web"""
     return [f"-D{flag}=1" for key, flag in (("mirror", "FM1B_MIRROR"), ("backup", "FM1B_BACKUP"))
-            if CONF.get(key) or os.environ.get(flag) == "1"]   # (FM1B_MIRROR=1: a build with it, fm1.toml as it is)
+            if CONF.get(key) or os.environ.get(flag) == "1"] + BOARD_DEFS   # (FM1B_MIRROR=1: a build with it, fm1.toml
+                                                                            # as it is; the board's, SMK-37 only)
 
 
 def build_host():
@@ -723,7 +736,7 @@ def build_host():
     out.mkdir(parents=True, exist_ok=True)
     exe = out / (STEM + "_host")                  # NAME_host; NAME-usb_host with --no-ble
     inc_dirs = [f"-I{d}" for d in (SRC / "device", SRC / "include", SRC / "lib", APP, GEN, *(APP / d for d in CONF.get("include", [])))]
-    o2_objs = o2_objects(os.environ.get("CC", "cc"), ["-O2", "-ffp-contract=off", "-std=c99", "-w", "-DPLAT_HOST", *inc_dirs],
+    o2_objs = o2_objects(os.environ.get("CC", "cc"), ["-O2", "-ffp-contract=off", "-std=c99", "-w", "-DPLAT_HOST", *BOARD_DEFS, *inc_dirs],
                          out / "o2")
     cmd = [os.environ.get("CC", "cc"), "-O2", "-ffp-contract=off", "-std=c99", "-Wall", "-Wextra",
            "-Wno-unused-function", "-Wno-unused-parameter", "-DPLAT_HOST", *opt_flags(), *["-DFM1B_BLE=1"] * BLE, *["-DFM1B_BLE_CENTRAL=1"] * (BLE and bool(CONF.get("ble_central"))), *["-DFM1B_WIFI=1"] * WIFI,
@@ -784,13 +797,15 @@ def build_web():
 
 
 def main():
-    global PRODUCT, VERSION, APP, OUT, GEN, LDR, ROOT, CONF, NAME, BLE, WIFI, STEM
+    global PRODUCT, VERSION, APP, OUT, GEN, LDR, ROOT, CONF, NAME, BLE, WIFI, STEM, BOARD, BOARD_DEFS, APP_SLOT
     ap = argparse.ArgumentParser()
     ap.add_argument("app", type=Path, help="the app's directory (with fm1.toml)")
     ap.add_argument("--release", metavar="X.Y[.Z]", help="release build: identity id_prefix + XXYYZZ, version string X.Y[.Z]")
     ap.add_argument("--no-ble", action="store_true", help="without Bluetooth (fm1.toml ble = true): NAME-usb.fwsc")
     ap.add_argument("--sdk", type=Path, help="JieLi AC79 SDK checkout (default: $AC79_SDK)")
     ap.add_argument("--host", action="store_true", help="build the host simulator instead of the firmware")
+    ap.add_argument("--board", choices=("fm1", "smk37"), help="the board: fm1 (default) or smk37 (default: $BOARD)")
+    ap.add_argument("--model", choices=sorted(MODELS), help="smk37: pro (default), elite or mke (default: $MODEL)")
     ap.add_argument("--web", action="store_true", help="build the browser emulator instead of the firmware")
     a = ap.parse_args()
     APP = a.app.resolve()
@@ -807,7 +822,26 @@ def main():
     prefix = CONF.get("id_prefix", "FM-1_0")
     if not re.fullmatch(r"FM-1_\d+", prefix):
         raise SystemExit(f"fm1.toml id_prefix {prefix!r}: FM-1_ and digits only (the update tools parse it)")
+    BOARD = (a.board or os.environ.get("BOARD") or "fm1").lower().replace("-", "")
+    if BOARD not in ("fm1", "smk37"):
+        raise SystemExit(f"BOARD={BOARD}: fm1 or smk37")
+    model = (a.model or (os.environ.get("MODEL") if BOARD == "smk37" else None) or "pro").lower()
+    if model not in MODELS or (model != "pro" and BOARD != "smk37"):
+        raise SystemExit(f"MODEL={model}: pro, elite or mke, with BOARD=smk37")
+    if BOARD == "smk37":                          # its model's name in the identity, the loader's and the update record's
+        BOARD_DEFS = ["-DBOARD_SMK37=1", *([f'-DSMK_MODEL="{MODELS[model]}"'] if model != "pro" else [])]
+        prefix = MODELS[model] + prefix[len("FM-1"):]
+        STEM += "-smk37" + ("" if model == "pro" else "-" + model)
+        if CONF.get("ble") or CONF.get("wifi"):
+            raise SystemExit("BOARD=smk37: no radio yet (the SMK-37's Bluetooth pairing area is never written)")
+        for key in ("usb_product",):              # the USB name says the board ("LOOM-8 FM-1" -> "LOOM-8 SMK-37")
+            if CONF.get(key):
+                CONF[key] = CONF[key].replace("FM-1", "SMK-37")
+    fm1pkg_make.set_board(BOARD)
+    APP_SLOT = fm1pkg_make.APP_SLOT
     PRODUCT = prefix + "00"
+    if len(PRODUCT) > 20:
+        raise SystemExit(f"identity {PRODUCT!r}: more than the package's 20 characters")
     name = STEM + ".fwsc"
     if a.release:
         # identity: the prefix + major, minor, patch as two digits each (0.1 -> FM-1_0000100): FM-1 is the
@@ -816,6 +850,8 @@ def main():
         if not m:
             raise SystemExit(f"--release {a.release}: use X.Y[.Z][-suffix], up to two digits each")
         PRODUCT = prefix + "%02d%02d%02d" % (int(m[1]), int(m[2]), int(m[3] or 0))
+        if len(PRODUCT) > 20:                     # (the package holds 20 identity characters: an SMK-37 Elite's
+            PRODUCT = prefix + "%02d%02d" % (int(m[1]), int(m[2]))   # release drops the patch digits)
         VERSION = a.release.upper()
         name = f"{STEM}-{a.release}.fwsc"
     if a.host or a.web:

@@ -42,6 +42,9 @@ static volatile uint32_t master_pos = 2048;   /* MASTER's position, 0..4096 (mai
                                                * or the mirror's when they set it) */
 uint32_t plat_master(void) { return master_pos; }
 
+#if BOARD_SMK37
+#include "plat_smk37.c"                   /* the SMK-37: its lights, no key sensing, its extras and windows */
+#else
 /* LEDs: the picture is built off-line and copied one byte per column (Felucca: clearing
  * and relighting would let the 10 kHz scan catch the dark gap and flicker) */
 static uint8_t led_pos[FM1_NKEY];
@@ -93,6 +96,7 @@ void plat_lights(uint32_t buttons, uint32_t keys, uint32_t dim_buttons, uint32_t
                     keys);
     }
 }
+#endif
 static uint8_t glow_on = 1, play_red;
 void plat_glow(int on) { glow_on = (uint8_t)(on != 0); }
 void plat_play_red(int red) { play_red = (uint8_t)(red != 0); }
@@ -138,8 +142,10 @@ void plat_sysex_send(const uint8_t *frame, uint32_t n) { ota_wire_send(frame, n)
 /* the data area and its two more windows (plat.h): read through the unencrypted XIP window (main_fm1.c
  * fl_plain_window_init, from 0x93000 up); erased and written by felucca-bsp's RAM driver (FL_RANGE_OK: the store, its
  * FL_XDATA windows) */
+#if !BOARD_SMK37                                  /* (the SMK's: plat_smk37.c) */
 _Static_assert(FL_XDATA0_LO == PLAT_XDATA0_LO && FL_XDATA0_HI == PLAT_XDATA0_HI && FL_XDATA1_HI == PLAT_XDATA1_HI &&
                FL_AUTO_LO == PLAT_XDATA1_LO && FL_AUTO_HI == FL_XDATA1_LO, "plat.h's windows are felucca-bsp's");
+#endif
 const uint8_t *plat_data(uint32_t off)
 {
     return flash_ok && PLAT_DATA_OK(off, 1u) ? (const uint8_t *)FL_XIP(off) : 0;
@@ -150,11 +156,18 @@ int plat_data_erase(uint32_t off)
     if (!flash_ok || (off & 0xFFFu) || !PLAT_DATA_OK(off, 0x1000u))
         return -1;
     fm1_wdt_feed();                               /* (a run of erases: tens of ms each) */
+#if BOARD_SMK37
+    smk_stock_release(off);                       /* (the stock firmware's marker, once: plat_smk37.c) */
+#endif
     audio_silence();
     return fl_erase4k(off, &took);
 }
 int plat_data_write(uint32_t off, const void *src, uint32_t n)
 {
+#if BOARD_SMK37
+    if (flash_ok && PLAT_DATA_OK(off, n))
+        smk_stock_release(off);
+#endif
     return flash_ok && PLAT_DATA_OK(off, n) ? fl_write(off, src, n) : -1;
 }
 /* a pull from the host in the update's framing (ota.c ota_read), and how long it may take */
@@ -242,6 +255,7 @@ void plat_midi_send(uint32_t pkt, uint32_t to)    /* the main loop's and the tic
 }
 void plat_midi_out(uint32_t pkt) { plat_midi_send(pkt, TO_USB); }
 
+#if !BOARD_SMK37                                  /* (the SMK: plat_smk37.c, none) */
 /* the keys' velocity and pressure (APP_KEY_SENSE): felucca-bsp's analog rows, as fm1-ctl and fm1-monk read them (the
  * converter's clock, a held key driven, the top row probed). Off, the converter is the main loop's (MASTER). */
 void plat_sense(int on)
@@ -268,6 +282,8 @@ uint32_t plat_analog_mask(void)
                 m |= 1u << (FM1_KEYMAP[r][c] - 14);
     return m;
 }
+
+#endif
 
 int plat_store_load(uint32_t obj, void *dst, uint32_t max) { return flash_ok ? st_load(obj, dst, max) : -1; }
 int plat_store_head(uint32_t obj, void *dst, uint32_t n) { return flash_ok ? st_load_head(obj, dst, n) : -1; }

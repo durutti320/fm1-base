@@ -708,7 +708,11 @@ static void fm1_main(void)
                                                     /* then 1.38 V (fm1_sys.h). At the boot loader's, flash fetches
                                                      * come back corrupted under load: the radio's trim crashed
                                                      * CTL-1 0.6 s into most Bluetooth starts */
+#if BOARD_SMK37
+        flash_ok = FL_JEDEC_OK(FL_FAR(fl_jedec_ram)());   /* the SMK-37's part (fm1_flash_smk37.h), else RAM only */
+#else
         flash_ok = FL_FAR(fl_jedec_ram)() == 0x856014u;   /* the expected 1 MiB part, else RAM only */
+#endif
         irq_restore(f);
         if (flash_ok) {
 #if FM1B_BACKUP
@@ -746,6 +750,10 @@ static void fm1_main(void)
     fm1b_dbg.max_us = 0;
     fm1_input_init();
     fm1_adc_init();
+#if BOARD_SMK37
+    if (flash_ok)                                   /* the unit's own key and pad velocity curves (USRTRIM, read only) */
+        smk_trim_load(fm1_xip_ptr(SMK_TRIM_FLASH));
+#endif
     panel_init();
     led_pos_init();
     app_init();                                     /* the app's engine and its saved state (or defaults) */
@@ -760,7 +768,11 @@ static void fm1_main(void)
     fm1_guard_lock_top();
     fm1_irq_enable_all();
     fm1_delay_ms(30);
+#if BOARD_SMK37
+    if ((fm1_in.buttons & FM1_OCT_BOTH) == FM1_OCT_BOTH)
+#else
     if ((fm1_in.buttons & 3u) == 3u)
+#endif
         panel_setup();                              /* OCT- + OCT+ held at power-on */
     fm1_delay_ms(400);
     radio_boot_note();                                /* what ended the last Bluetooth run, into its log */
@@ -780,7 +792,11 @@ static void fm1_main(void)
             bootguard.failed = 0;
         }
         {   /* MASTER: smoothed, 0..4092; with the keys' readings on, the scan owns the converter and reads it too */
+#if BOARD_SMK37
+            int32_t a = fm1_adc_read(FM1_ADC_MASTER);   /* (K1, a virtual pot: smk_input.h) */
+#else
             int32_t a = fm1_an.con || fm1_an.pend ? (int32_t)fm1_an.master : fm1_adc_read(FM1_ADC_MASTER);
+#endif
             if (a >= 0) {
                 knob += (a * 16 - knob) / 8;
                 master_pos = mirror_in_master(remote.master >= 0 ? (uint32_t)remote.master : (uint32_t)(knob / 4));
@@ -848,11 +864,17 @@ static void fm1_main(void)
 #if FM1B_CDC
         cdc_task();
 #endif
+#if BOARD_SMK37
+        smk_wheels();                               /* (the wheels follow the hand, not the screen: smk37_io.c) */
+#endif
         if (fm1_ms - last_frame >= 16u) {           /* ~60 frames/s at most; input in between */
             last_frame = fm1_ms;
             fm1b_dbg.ui_frames++;
             fm1b_dbg.stage = 5;
             app_frame();
+#if BOARD_SMK37
+            padled_flush();                         /* the pads' colours, between screen transfers */
+#endif
         } else {
             fm1b_dbg.stage = 6;
             app_input_only();

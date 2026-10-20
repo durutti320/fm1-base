@@ -39,6 +39,10 @@
     (FM1_KEYMAP[rowbit][col] >= 14 ? app_key_probe(FM1_KEY_OF(col, rowbit), (v), (pressed)) : (void)0)
 #define FM1_INPUT_LED_OK(col, rowbit) (FM1_KEYMAP[rowbit][col] < 14 || app_key_led_ok(FM1_KEY_OF(col, rowbit)))
 #endif
+#if BOARD_SMK37                   /* the SMK-37: the pads are pads, never keys (felucca-bsp boards/smk37, plat_smk37.c) */
+static void smk_pad_event(uint32_t pad, uint32_t vel);
+#define SMK_PAD_EVENT(pad, vel) smk_pad_event((pad), (vel))
+#endif
 #include "fm1_time.h"
 #include "fm1_sys.h"
 #include "fm1_irq.h"
@@ -54,6 +58,9 @@
 
 #include "libc.c"
 #include "lcd.c"
+#if BOARD_SMK37
+#include "smk37_io.c"             /* the SMK-37's pad LEDs and wheels (genkigenki's, GPL-3.0-only) */
+#endif
 #include "gfx.c"
 
 static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIMER5 ISR) */
@@ -101,7 +108,14 @@ static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIME
 #define SXQ 128u                  /* the SysEx send ring, in packets: a whole screen-reader SAY (ANN_MAX + 9 bytes) */
 #include "usb.c"
 #ifndef FM1B_TRS
+#if BOARD_SMK37
+#define FM1B_TRS 0                /* the SMK-37: no TRS MIDI IN (PH8 is a key-matrix row there, never UART RX) */
+#else
 #define FM1B_TRS 1
+#endif
+#endif
+#if BOARD_SMK37 && FM1B_TRS
+#error "BOARD_SMK37: midi_uart.c is the FM-1's MIDI IN (RX on PH8, a key-matrix row on the SMK-37)"
 #endif
 #if FM1B_TRS
 #include "midi_uart.c"
