@@ -829,6 +829,11 @@ def main():
     if model not in MODELS or (model != "pro" and BOARD != "smk37"):
         raise SystemExit(f"MODEL={model}: pro, elite or mke, with BOARD=smk37")
     if BOARD == "smk37":                          # its model's name in the identity, the loader's and the update record's
+        for key in [k for k in CONF if k.startswith("smk37_")]:   # fm1.toml smk37_X: X for the SMK-37 build (its own
+            CONF[key[len("smk37_"):]] = CONF[key]                 # name, its USB names)
+        if CONF.get("smk37_name"):
+            STEM = CONF["smk37_name"].lower() + STEM[len(NAME):]
+            NAME = CONF["smk37_name"].lower()
         BOARD_DEFS = ["-DBOARD_SMK37=1", *([f'-DSMK_MODEL="{MODELS[model]}"'] if model != "pro" else [])]
         prefix = MODELS[model] + prefix[len("FM-1"):]
         STEM += "-smk37" + ("" if model == "pro" else "-" + model)
