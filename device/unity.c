@@ -138,11 +138,17 @@ static int st_read(uint32_t off, void *dst, uint32_t n)   /* 256-byte IRQ-off wi
     }
     return 0;
 }
+#if BOARD_SMK37
+static void smk_stock_release(uint32_t off);     /* (plat_smk37.c: the stock firmware's USRFLASH marker, once) */
+#endif
 static int st_erase(uint32_t off)
 {
     uint32_t took;
     if (!FL_STORE_OK(off, 0x1000u))
         return -8;
+#if BOARD_SMK37
+    smk_stock_release(off);
+#endif
     audio_silence();
     return fl_erase4k(off, &took);
 }
@@ -150,6 +156,9 @@ static int st_prog(uint32_t off, const void *src, uint32_t n)
 {
     if (!FL_STORE_OK(off, n))
         return -8;
+#if BOARD_SMK37
+    smk_stock_release(off);
+#endif
     return fl_write(off, src, n);
 }
 #include "storage.c"

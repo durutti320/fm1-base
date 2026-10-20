@@ -157,43 +157,43 @@ uint32_t plat_keys(void) { return held_keys | mirror_in_keys(); }
 #if BOARD_SMK37
 /* the M-VAVE SMK-37's extras (plat.h PLAT_SMK37), driven by the script: smkbtn, pad, outer, fader, bend, modw, keyvel;
  * the pads' colours and the four buttons' LEDs by "pads" */
-static uint32_t smk_btn, smk_pads_down, smk_lit, smk_rgb[NPADS], smk_fader[4];
-static uint8_t smk_vel[NKEYS];
-static int32_t smk_bendv;
-static uint32_t smk_modv;
-static uint16_t smk_padq[64], smk_outq[64];
-static uint32_t smk_padw, smk_padr, smk_outw, smk_outr;
-uint32_t plat_smk_buttons(void) { return smk_btn; }
-uint32_t plat_key_vel(int k) { return k >= 0 && k < NKEYS && smk_vel[k] ? smk_vel[k] : 100u; }
+static uint32_t hsmk_btn, hsmk_pads_down, hsmk_lit, hsmk_rgb[NPADS], hsmk_fader[4];
+static uint8_t hsmk_vel[NKEYS];
+static int32_t hsmk_bendv;
+static uint32_t hsmk_modv;
+static uint16_t hsmk_padq[64], hsmk_outq[64];
+static uint32_t hsmk_padw, hsmk_padr, hsmk_outw, hsmk_outr;
+uint32_t plat_smk_buttons(void) { return hsmk_btn; }
+uint32_t plat_key_vel(int k) { return k >= 0 && k < NKEYS && hsmk_vel[k] ? hsmk_vel[k] : 100u; }
 int plat_pad(int *pad, int *vel)
 {
-    if (smk_padr == smk_padw)
+    if (hsmk_padr == hsmk_padw)
         return 0;
-    *pad = smk_padq[smk_padr % 64u] >> 8;
-    *vel = smk_padq[smk_padr % 64u] & 0x7F;
-    smk_padr++;
+    *pad = hsmk_padq[hsmk_padr % 64u] >> 8;
+    *vel = hsmk_padq[hsmk_padr % 64u] & 0x7F;
+    hsmk_padr++;
     return 1;
 }
-uint32_t plat_pads_held(void) { return smk_pads_down; }
+uint32_t plat_pads_held(void) { return hsmk_pads_down; }
 int plat_outer(int *key, int *vel)
 {
-    if (smk_outr == smk_outw)
+    if (hsmk_outr == hsmk_outw)
         return 0;
-    *key = smk_outq[smk_outr % 64u] >> 8;
-    *vel = smk_outq[smk_outr % 64u] & 0x7F;
-    smk_outr++;
+    *key = hsmk_outq[hsmk_outr % 64u] >> 8;
+    *vel = hsmk_outq[hsmk_outr % 64u] & 0x7F;
+    hsmk_outr++;
     return 1;
 }
-uint32_t plat_fader(int f) { return f >= 0 && f < 4 ? smk_fader[f] : 0u; }
-int32_t plat_bend(void) { return smk_bendv; }
-uint32_t plat_modw(void) { return smk_modv; }
-void plat_smk_leds(uint32_t lit) { smk_lit = lit; }
+uint32_t plat_fader(int f) { return f >= 0 && f < 4 ? hsmk_fader[f] : 0u; }
+int32_t plat_bend(void) { return hsmk_bendv; }
+uint32_t plat_modw(void) { return hsmk_modv; }
+void plat_smk_leds(uint32_t lit) { hsmk_lit = lit; }
 void plat_pad_rgb(int pad, uint32_t rgb)
 {
     if (pad >= 0 && pad < NPADS)
-        smk_rgb[pad] = rgb & 0xFFFFFFu;
+        hsmk_rgb[pad] = rgb & 0xFFFFFFu;
 }
-static const char *const SMK_BTN_N[NSB] = {"KNOBBANK", "FADERBANK", "<", ">"};
+static const char *const HSMK_BTN_N[NSB] = {"KNOBBANK", "FADERBANK", "<", ">"};
 #endif
 static uint32_t plat_remote_keys(void) { return 0; }   /* (the device's remote control: the script is this one's) */
 int32_t plat_enc(int role)
@@ -1357,17 +1357,17 @@ int main(int argc, char **argv)
             png_write(out);
 #if BOARD_SMK37
         } else if (!strcmp(cmd, "smkbtn") || !strcmp(cmd, "smktap")) {   /* smkbtn NAME down|up, smktap NAME */
-            int i = find_name(SMK_BTN_N, NSB, a);
+            int i = find_name(HSMK_BTN_N, NSB, a);
             if (i < 0) {
                 printf("line %d: no SMK button %s\n", lineno, a);
                 return 2;
             }
             if (cmd[3] == 't' || !strcmp(b, "down"))
-                smk_btn |= 1u << i;
+                hsmk_btn |= 1u << i;
             if (cmd[3] == 't')
                 run_ms(40);
             if (cmd[3] == 't' || !strcmp(b, "up"))
-                smk_btn &= ~(1u << i);
+                hsmk_btn &= ~(1u << i);
             run_ms(cmd[3] == 't' ? 40 : 2);
         } else if (!strcmp(cmd, "pad") || !strcmp(cmd, "tappad")) {   /* pad P VEL (0: up), tappad P [VEL] */
             int pd = atoi(a), v = b[0] ? atoi(b) : 100;
@@ -1377,42 +1377,42 @@ int main(int argc, char **argv)
             }
             if (cmd[0] == 't' && !v)
                 v = 100;
-            smk_padq[smk_padw++ % 64u] = (uint16_t)(pd << 8 | (v & 0x7F));
-            smk_pads_down = v ? smk_pads_down | 1u << pd : smk_pads_down & ~(1u << pd);
+            hsmk_padq[hsmk_padw++ % 64u] = (uint16_t)(pd << 8 | (v & 0x7F));
+            hsmk_pads_down = v ? hsmk_pads_down | 1u << pd : hsmk_pads_down & ~(1u << pd);
             run_ms(cmd[0] == 't' ? 50 : 2);
             if (cmd[0] == 't') {
-                smk_padq[smk_padw++ % 64u] = (uint16_t)(pd << 8);
-                smk_pads_down &= ~(1u << pd);
+                hsmk_padq[hsmk_padw++ % 64u] = (uint16_t)(pd << 8);
+                hsmk_pads_down &= ~(1u << pd);
                 run_ms(30);
             }
         } else if (!strcmp(cmd, "outer")) {          /* outer I VEL (0: up): an outer key, 0..4 C3..E3, 5..9 G#5..C6 */
             int k = atoi(a), v = atoi(b);
-            smk_outq[smk_outw++ % 64u] = (uint16_t)(k << 8 | (v & 0x7F));
+            hsmk_outq[hsmk_outw++ % 64u] = (uint16_t)(k << 8 | (v & 0x7F));
             run_ms(2);
         } else if (!strcmp(cmd, "fader")) {          /* fader F V: fader F (0..3) to V (0..127) */
             int f = atoi(a);
             if (f >= 0 && f < 4)
-                smk_fader[f] = (uint32_t)clamp(atoi(b), 0, 127);
+                hsmk_fader[f] = (uint32_t)clamp(atoi(b), 0, 127);
             run_ms(20);
         } else if (!strcmp(cmd, "bend")) {
-            smk_bendv = clamp(atoi(a), -8192, 8191);
+            hsmk_bendv = clamp(atoi(a), -8192, 8191);
             run_ms(10);
         } else if (!strcmp(cmd, "modw")) {
-            smk_modv = (uint32_t)clamp(atoi(a), 0, 127);
+            hsmk_modv = (uint32_t)clamp(atoi(a), 0, 127);
             run_ms(10);
         } else if (!strcmp(cmd, "keyvel")) {         /* keyvel KEY V: the velocity the next press of KEY gives */
             int k = key_of(a);
             if (k >= 0 && k < NKEYS)
-                smk_vel[k] = (uint8_t)clamp(atoi(b), 1, 127);
+                hsmk_vel[k] = (uint8_t)clamp(atoi(b), 1, 127);
         } else if (!strcmp(cmd, "pads")) {           /* pads: the 16 pads' colours (top row first), the SMK LEDs */
             int i;
             printf("  pads:");
             for (i = 0; i < NPADS; i++)
-                printf("%s%06x", i == 8 ? " |" : " ", smk_rgb[i]);
+                printf("%s%06x", i == 8 ? " |" : " ", hsmk_rgb[i]);
             printf("  lit:");
             for (i = 0; i < NSB; i++)
-                if (smk_lit >> i & 1u)
-                    printf(" %s", SMK_BTN_N[i]);
+                if (hsmk_lit >> i & 1u)
+                    printf(" %s", HSMK_BTN_N[i]);
             printf("\n");
 #endif
         } else if (!strcmp(cmd, "leds")) {
