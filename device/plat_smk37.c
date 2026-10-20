@@ -100,6 +100,14 @@ int plat_outer(int *key, int *vel)
     }
     return 0;
 }
+/* K1 as a knob of its own (plat_k1_raw): the main loop leaves the volume where it is (main_fm1.c) */
+static volatile uint8_t smk_k1_raw;
+void plat_k1_raw(int on)
+{
+    (void)fm1_enc_take(SMK_ENC_MASTER);           /* (turns from before: neither the volume's nor the app's) */
+    smk_k1_raw = (uint8_t)(on != 0);
+}
+int32_t plat_k1_enc(void) { return smk_k1_raw ? fm1_enc_take(SMK_ENC_MASTER) : 0; }
 uint32_t plat_fader(int f) { return f >= 0 && f < 4 ? fm1_in.fader[f] : 0u; }
 int32_t plat_bend(void) { return smk_bend14; }
 uint32_t plat_modw(void) { return smk_modw; }

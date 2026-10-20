@@ -68,6 +68,9 @@ int32_t plat_bend(void);               /* the pitch wheel, -8192..8191, 0 at res
 uint32_t plat_modw(void);              /* the mod wheel, 0..127 */
 void plat_smk_leds(uint32_t lit);      /* the four buttons' LEDs: bit SB_* lit */
 void plat_pad_rgb(int pad, uint32_t rgb);   /* pad p's colour, 0xRRGGBB (sent between screen transfers) */
+void plat_k1_raw(int on);              /* on: K1 (MASTER's place) is no longer the volume, which stays where it is; its
+                                        * turns go to plat_k1_enc instead (a MIDI controller's mode) */
+int32_t plat_k1_enc(void);             /* K1's detents since the last call, + = clockwise (0 unless plat_k1_raw) */
 #else
 #define PLAT_SMK37 0
 #endif

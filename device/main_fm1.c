@@ -793,7 +793,8 @@ static void fm1_main(void)
         }
         {   /* MASTER: smoothed, 0..4092; with the keys' readings on, the scan owns the converter and reads it too */
 #if BOARD_SMK37
-            int32_t a = fm1_adc_read(FM1_ADC_MASTER);   /* (K1, a virtual pot: smk_input.h) */
+            int32_t a = smk_k1_raw ? -1 : fm1_adc_read(FM1_ADC_MASTER);   /* (K1, a virtual pot: smk_input.h; the
+                                                                            * app's own knob: plat_k1_raw) */
 #else
             int32_t a = fm1_an.con || fm1_an.pend ? (int32_t)fm1_an.master : fm1_adc_read(FM1_ADC_MASTER);
 #endif

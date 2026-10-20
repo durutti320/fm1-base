@@ -155,7 +155,7 @@ uint32_t plat_ms(void) { return now_ms; }
 uint32_t plat_buttons(void) { return held_btn | mirror_in_buttons(); }   /* (+ the host's: the mirror's remote) */
 uint32_t plat_keys(void) { return held_keys | mirror_in_keys(); }
 #if BOARD_SMK37
-/* the M-VAVE SMK-37's extras (plat.h PLAT_SMK37), driven by the script: smkbtn, pad, outer, fader, bend, modw, keyvel;
+/* the M-VAVE SMK-37's extras (plat.h PLAT_SMK37), driven by the script: smkbtn, pad, outer, fader, bend, modw, k1, keyvel;
  * the pads' colours and the four buttons' LEDs by "pads" */
 static uint32_t hsmk_btn, hsmk_pads_down, hsmk_lit, hsmk_rgb[NPADS], hsmk_fader[4];
 static uint8_t hsmk_vel[NKEYS];
@@ -187,6 +187,19 @@ int plat_outer(int *key, int *vel)
 uint32_t plat_fader(int f) { return f >= 0 && f < 4 ? hsmk_fader[f] : 0u; }
 int32_t plat_bend(void) { return hsmk_bendv; }
 uint32_t plat_modw(void) { return hsmk_modv; }
+static int hsmk_k1raw;
+static int32_t hsmk_k1;
+void plat_k1_raw(int on)
+{
+    hsmk_k1raw = on != 0;
+    hsmk_k1 = 0;
+}
+int32_t plat_k1_enc(void)
+{
+    int32_t d = hsmk_k1raw ? hsmk_k1 : 0;
+    hsmk_k1 = 0;
+    return d;
+}
 void plat_smk_leds(uint32_t lit) { hsmk_lit = lit; }
 void plat_pad_rgb(int pad, uint32_t rgb)
 {
@@ -1400,6 +1413,12 @@ int main(int argc, char **argv)
         } else if (!strcmp(cmd, "modw")) {
             hsmk_modv = (uint32_t)clamp(atoi(a), 0, 127);
             run_ms(10);
+        } else if (!strcmp(cmd, "k1")) {             /* k1 D: K1 turned D detents (the volume, or plat_k1_enc's) */
+            if (hsmk_k1raw)
+                hsmk_k1 += atoi(a);
+            else
+                master = (uint32_t)clamp((int)master + atoi(a) * 96, 0, 4096);
+            run_ms(20);
         } else if (!strcmp(cmd, "keyvel")) {         /* keyvel KEY V: the velocity the next press of KEY gives */
             int k = key_of(a);
             if (k >= 0 && k < NKEYS)
