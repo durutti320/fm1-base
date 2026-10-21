@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MPL-2.0
- * Copyright (C) 2026 Cam Durnsford (ARACHNE, the LOOM-8 SMK-37 port) */
+ * Copyright (C) 2026 Cam Durnsford (SPIDER, the LOOM-8 SMK-37 port) */
 /* fm1-base on the M-VAVE SMK-37 (BOARD_SMK37): the parts of plat.h that differ from the FM-1's (plat_fm1.c includes
  * this in their place) and the SMK's extras (plat.h, PLAT_SMK37). Over felucca-bsp's boards/smk37 (genkigenki's SMK-37
  * input HAL) and smk37_io.c (its pad LEDs and wheels). The buttons, keys and knobs need nothing of their own:
@@ -50,10 +50,13 @@ uint32_t plat_smk_buttons(void)
     return ((b >> SMK_BTN_KNOB_BANK) & 1u) << SB_KNOB_BANK | ((b >> SMK_BTN_FADER_BANK) & 1u) << SB_FADER_BANK |
            ((b >> SMK_BTN_LEFT) & 1u) << SB_LEFT | ((b >> SMK_BTN_RIGHT) & 1u) << SB_RIGHT;
 }
+/* a velocity 1..127: the unit's curve can give 1024 at the very top (smk_input.h smk_curve), 128 once in 7 bits,
+ * which as MIDI would be a note-off */
+static uint32_t smk_vel_clamp(uint32_t v) { return v > 127u ? 127u : v; }
 uint32_t plat_key_vel(int k)
 {
     uint32_t v = k >= 0 && k < NKEYS ? fm1_in.key_vel[SMK_KEY_F3 + (uint32_t)k] : 0u;
-    return v ? v : 100u;
+    return v ? smk_vel_clamp(v) : 100u;
 }
 /* the pads: smk_input.h hands each hit and release here (SMK_PAD_EVENT, the 10 kHz scan), a ring for the main loop */
 #define SMK_PADQ 32u
@@ -68,7 +71,7 @@ static void smk_pad_event(uint32_t pad, uint32_t vel)
     smk_pads_down = vel ? smk_pads_down | 1u << pad : smk_pads_down & ~(1u << pad);
     if ((uint8_t)((w + 1u) % SMK_PADQ) == smk_padq_r)
         return;                                   /* (full: dropped; the held mask stays right) */
-    smk_padq[w] = (uint16_t)(pad << 8 | (vel & 0x7Fu));
+    smk_padq[w] = (uint16_t)(pad << 8 | smk_vel_clamp(vel));   /* (a hit is never 0: a release) */
     smk_padq_w = (uint8_t)((w + 1u) % SMK_PADQ);
 }
 int plat_pad(int *pad, int *vel)
@@ -95,7 +98,7 @@ int plat_outer(int *key, int *vel)
             *key = (int)(k - (SMK_KEY_F3 + NKEYS)) + 5;
         else
             continue;
-        *vel = (int)(e & 0x7F);
+        *vel = (int)smk_vel_clamp((uint32_t)e & 0xFFu);   /* (128 at the very top: kept a hit) */
         return 1;
     }
     return 0;

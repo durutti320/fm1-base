@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
- * SMK-37 Pro port: Copyright (C) 2026 M. Geisler (genkigenki/makkuro); in fm1-base: Cam Durnsford (ARACHNE) */
+ * SMK-37 Pro port: Copyright (C) 2026 M. Geisler (genkigenki/makkuro); in fm1-base: Cam Durnsford (SPIDER) */
 /* The M-VAVE SMK-37's pad LEDs and wheels (BOARD_SMK37), from genkigenki's SMK-37 layer for Felucca
  * (genkigenki/Felucca branch smk37: src/lcd.c padled_*, src/main.c smk_wheels). GPL-3.0-only like that layer, not
  * fm1-base's MPL-2.0. Part of the unity build after lcd.c (plat_smk37.c uses it). */
