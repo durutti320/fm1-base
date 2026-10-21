@@ -5,6 +5,15 @@
 that file under MPL-2.0. Your own files, such as an app built on fm1-base, may use any licence, closed ones included.
 So a firmware made of felucca-bsp, fm1-base and its own code may link JieLi's binary Bluetooth and Wi-Fi libraries.
 
+## The SMK-37 target (a fork's branch `smk37`)
+
+`device/smk37_io.c` (the SMK-37's pad lights and wheels) is genkigenki's, from his SMK-37 layer for Felucca
+(Felucca branch `smk37`; [fm1-to-smk37](https://github.com/genkigenki/fm1-to-smk37)), and is **GPL-3.0-only**, not
+MPL-2.0, as its header says; so is `bsp/boards/smk37/`. A firmware built for the SMK-37 (`BOARD=smk37`) therefore
+includes GPL-3.0-only code and must be shared under the GPL. The rest of the SMK-37 target (`device/plat_smk37.c`,
+the `BOARD_SMK37` switches) is MPL-2.0 like the files around it. The FM-1 build uses none of the GPL files. Before
+any of this goes upstream, its author's permission to relicense his files under MPL-2.0 is needed.
+
 ## Where the code comes from
 
 | Code | Origin | Why it is MPL-2.0 |

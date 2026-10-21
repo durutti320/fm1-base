@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MPL-2.0
- * Copyright (C) 2026 LOOM-8 SMK port */
+ * Copyright (C) 2026 Cam Durnsford (FLY, the LOOM-8 SMK-37 port) */
 /* fm1-base on the M-VAVE SMK-37 (BOARD_SMK37): the parts of plat.h that differ from the FM-1's (plat_fm1.c includes
  * this in their place) and the SMK's extras (plat.h, PLAT_SMK37). Over felucca-bsp's boards/smk37 (genkigenki's SMK-37
  * input HAL) and smk37_io.c (its pad LEDs and wheels). The buttons, keys and knobs need nothing of their own:
