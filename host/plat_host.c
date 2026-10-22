@@ -206,6 +206,7 @@ void plat_pad_rgb(int pad, uint32_t rgb)
     if (pad >= 0 && pad < NPADS)
         hsmk_rgb[pad] = rgb & 0xFFFFFFu;
 }
+void plat_pad_flush(void) {}                       /* (the colours are read here as they are set) */
 static const char *const HSMK_BTN_N[NSB] = {"KNOBBANK", "FADERBANK", "<", ">"};
 #endif
 static uint32_t plat_remote_keys(void) { return 0; }   /* (the device's remote control: the script is this one's) */

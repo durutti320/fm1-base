@@ -143,6 +143,47 @@ __attribute__((used, visibility("default"))) uint32_t web_store_writes(void) { r
 __attribute__((used, visibility("default"))) uint32_t web_nobj(void) { return OBJ_NOBJ; }
 __attribute__((used, visibility("default"))) uint32_t web_store_max(void) { return PLAT_STORE_MAX; }
 
+#if BOARD_SMK37
+/* the M-VAVE SMK-37's extras (host/plat_host.c hsmk_*, as the simulator's script drives them): its four buttons, the
+ * pads (vel 0: let go), the outer keys, the faders (0..127), the wheels, K1 (detents: the volume, or the app's knob),
+ * a key's velocity at its next press; the pads' colours and the four buttons' LEDs back */
+__attribute__((used, visibility("default"))) void web_smk_buttons(uint32_t m) { hsmk_btn = m; }
+__attribute__((used, visibility("default"))) void web_pad(uint32_t p, uint32_t vel)
+{
+    if (p >= NPADS)
+        return;
+    hsmk_padq[hsmk_padw++ % 64u] = (uint16_t)(p << 8 | (vel & 0x7Fu));
+    hsmk_pads_down = vel ? hsmk_pads_down | 1u << p : hsmk_pads_down & ~(1u << p);
+}
+__attribute__((used, visibility("default"))) void web_outer(uint32_t k, uint32_t vel)
+{
+    if (k < NOUTER)
+        hsmk_outq[hsmk_outw++ % 64u] = (uint16_t)(k << 8 | (vel & 0x7Fu));
+}
+__attribute__((used, visibility("default"))) void web_fader(uint32_t f, uint32_t v)
+{
+    if (f < 4u)
+        hsmk_fader[f] = v > 127u ? 127u : v;
+}
+__attribute__((used, visibility("default"))) void web_bend(int32_t v) { hsmk_bendv = v < -8192 ? -8192 : v > 8191 ? 8191 : v; }
+__attribute__((used, visibility("default"))) void web_modw(uint32_t v) { hsmk_modv = v > 127u ? 127u : v; }
+__attribute__((used, visibility("default"))) void web_k1(int32_t n)
+{
+    if (hsmk_k1raw)
+        hsmk_k1 += n;
+    else
+        master = (uint32_t)clamp((int)master + n * 96, 0, 4096);
+}
+__attribute__((used, visibility("default"))) void web_key_vel(uint32_t k, uint32_t vel)
+{
+    if (k < NKEYS)
+        hsmk_vel[k] = (uint8_t)(vel < 1u ? 1u : vel > 127u ? 127u : vel);
+}
+__attribute__((used, visibility("default"))) uint32_t *web_pad_rgb(void) { return hsmk_rgb; }
+__attribute__((used, visibility("default"))) uint32_t web_smk_lit(void) { return hsmk_lit; }
+__attribute__((used, visibility("default"))) uint32_t web_master_pos(void) { return master; }
+#endif
+
 #ifdef APP_WEB
 #include "web.c"                        /* the app's own exports for its page (app.h APP_WEB) */
 #endif
