@@ -782,6 +782,10 @@ static void fm1_main(void)
 #ifdef APP_BOOT
     app_boot();                                     /* the app's own start (a radio), the platform up */
 #endif
+#ifdef APP_SPLASH_LATE
+    app_splash_late(!bootguard.failed);             /* the app's boot animation, the platform up (its sound in the
+                                                     * render, the scan, the lights); a still after a failed boot */
+#endif
     app_ui_init();
 
     for (;;) {

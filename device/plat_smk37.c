@@ -119,6 +119,7 @@ void plat_pad_rgb(int pad, uint32_t rgb)
     if (pad >= 0 && pad < NPADS)
         padled_set((uint32_t)pad, (uint8_t)(rgb >> 16), (uint8_t)(rgb >> 8), (uint8_t)rgb);
 }
+void plat_pad_flush(void) { padled_flush(); }   /* (smk37_io.c: between screen transfers, only on a change) */
 
 /* ---- the data windows: the SMK's (plat.h, felucca-bsp fm1_flash_smk37.h). The stock firmware trusts USRFLASH while
  * its end marker "usrdata" (0xEAFF8) is there: its sector is erased once, before the first erase or write into

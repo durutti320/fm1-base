@@ -68,6 +68,8 @@ int32_t plat_bend(void);               /* the pitch wheel, -8192..8191, 0 at res
 uint32_t plat_modw(void);              /* the mod wheel, 0..127 */
 void plat_smk_leds(uint32_t lit);      /* the four buttons' LEDs: bit SB_* lit */
 void plat_pad_rgb(int pad, uint32_t rgb);   /* pad p's colour, 0xRRGGBB (sent between screen transfers) */
+void plat_pad_flush(void);             /* send the pads' colours now (the main loop does after each frame; a screen
+                                        * drawn outside it, as APP_SPLASH_LATE, calls it after each of its frames) */
 void plat_k1_raw(int on);              /* on: K1 (MASTER's place) is no longer the volume, which stays where it is; its
                                         * turns go to plat_k1_enc instead (a MIDI controller's mode) */
 int32_t plat_k1_enc(void);             /* K1's detents since the last call, + = clockwise (0 unless plat_k1_raw) */
@@ -236,6 +238,9 @@ uint32_t plat_xruns(void);
  *   APP_YIELD       void app_yield(void)          from plat_yield, inside long work
  *   APP_OVERLOAD    void app_overload(void)       the render took over 90 % of its time (shed voices)
  *   APP_SPLASH      void app_splash(void)         the first screen at boot, instead of the name
+ *   APP_SPLASH_LATE void app_splash_late(int show)   after APP_BOOT, before app_ui_init, the platform up (the audio
+ *                   renders, the scan runs, USB): an animated boot with sound and lights (app_splash its first still;
+ *                   SMK-37: plat_pad_flush). show 0: a boot failed before this one (bootguard): no show, a still
  *   APP_GAIN(m)     the render's gain from MASTER's position m (0..4096; default the square, m * m >> 12)
  *   APP_QUIET       void app_quiet(int32_t *lr, uint32_t n)   the render while the flash must not be read (the
  *                   radio's first second, FM1B_BLE): keep time without sound (default: silence)
