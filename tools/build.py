@@ -825,6 +825,7 @@ def main():
     BOARD = (a.board or os.environ.get("BOARD") or "fm1").lower().replace("-", "")
     if BOARD not in ("fm1", "smk37"):
         raise SystemExit(f"BOARD={BOARD}: fm1 or smk37")
+    os.environ["BOARD"] = BOARD                   # (--board too: the app's generators read it, fm1.toml gen)
     model = (a.model or (os.environ.get("MODEL") if BOARD == "smk37" else None) or "pro").lower()
     if model not in MODELS or (model != "pro" and BOARD != "smk37"):
         raise SystemExit(f"MODEL={model}: pro, elite or mke, with BOARD=smk37")
