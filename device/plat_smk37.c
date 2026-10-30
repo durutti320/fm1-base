@@ -41,6 +41,8 @@ void plat_smk_leds(uint32_t lit) { smk_own_lit = lit & ((1u << NSB) - 1u); }
 
 /* ---- no key sensing on the SMK: its keys have velocity of their own (plat_key_vel) */
 void plat_sense(int on) { (void)on; }
+int plat_battery(void) { return -1; }            /* (no battery reading: the SMK-37 runs on USB power) */
+void plat_lights_mid(uint32_t buttons, uint32_t keys) { (void)buttons; (void)keys; }   /* (its LEDs: on or off) */
 uint32_t plat_analog_mask(void) { return 0; }
 
 /* ---- the extras */

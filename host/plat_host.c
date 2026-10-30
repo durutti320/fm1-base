@@ -17,7 +17,8 @@
  *   turn ENC N [MS]              (ENC: SELECT ALGO PRESET K1 K2 K3 K4; N detents, MS apart, default 80)
  *   spin ENC N                   N detents at once, exactly N (no acceleration)
  *   master N                     MASTER pot 0..4096 (then 40 ms, as the device's smoothing settles)
- *   midi [PORT] B0 B1 B2         incoming MIDI message (PORT: USB, the default, BLE or TRS; hex bytes)
+ *   midi [PORT] B0 B1 B2         incoming MIDI message (PORT: USB, the default, BLE, BLE-DEV or TRS; hex bytes;
+ *                                BLE is the computer's link, BLE-DEV the device's: both PORT_BLE, FM1B_BLE_CENTRAL)
  *   ble connect | ble link | ble disconnect   a central listening, or linked and not yet listening (FM1B_BLE: the
  *                                stand-in stack is ready a second after the start)
  *   wav FILE | wavstop           start / stop recording the output
@@ -25,7 +26,8 @@
  *   shot FILE.png                save the screen
  *   leds                         print the lit buttons and keys (keys: # bright, + dim)
  *   out                          print the MIDI sent since the last "out" (and forget it; clocks not shown)
- *   expect_out PORT B0 B1 B2     check that this message went out to PORT since the last "out"
+ *   expect_out PORT B0 B1 B2     check that this message went out to PORT since the last "out" (USB, BLE, BLE-DEV)
+ *   expect_no_out PORT B0 B1 B2  check that it did not
  *   expect WHAT VALUE            check state: exit 1 on mismatch; VALUE "<N" / ">N" is a bound
  *   reboot                       re-run boot from the simulated flash (persistence test)
  *   data FILE OFFSET             a file into the simulated data area (plat_data) at OFFSET (its windows: plat.h)
@@ -71,6 +73,9 @@
 #ifndef FM1B_BACKUP
 #define FM1B_BACKUP 0                           /* fm1.toml backup = true */
 #endif
+#ifndef FM1B_CPU2
+#define FM1B_CPU2 0                             /* fm1.toml cpu2 = true */
+#endif
 #ifdef __linux__
 #define _GNU_SOURCE                             /* (open_memstream: --serve) */
 #endif
@@ -83,7 +88,12 @@
 #define __attribute__(x)
 
 /* ------------------------------------------------------------ screen --- */
+#ifdef PLAT_FB
+static uint16_t *const fb = PLAT_FB;    /* the embedder's own (host/rfm1.c: the panel's LCD) */
+#else
 static uint16_t fb[240 * 240];          /* RGB565, byte-swapped as the panel takes it (gfx.c) */
+#endif
+static uint32_t lcd_changes;            /* every fill and blit (host/rfm1.c: the panel's lcd_writes) */
 static void lcd_sync(void) {}
 #if FM1B_MIRROR
 /* screen mirroring over USB (device/mirror.c), as lcd.c copies each blit and fill to it */
@@ -99,6 +109,7 @@ static void lcd_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t c)
     if (mirror_on && w && h && x < 240u && y < 240u)
         mirror_fill(x, y, x + w > 240u ? 240u - x : w, y + h > 240u ? 240u - y : h, c);
 #endif
+    lcd_changes++;
     for (j = y; j < y + h && j < 240u; j++)
         for (i = x; i < x + w && i < 240u; i++)
             fb[j * 240u + i] = sc;
@@ -108,6 +119,7 @@ static void lcd_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint1
 {
     uint32_t i, j;
     blits++;
+    lcd_changes++;
     for (j = 0; j < h; j++)
         for (i = 0; i < w; i++)
             if (x + i < 240u && y + j < 240u)
@@ -150,6 +162,8 @@ static void mirror_leds(uint32_t buttons, uint32_t keys) { (void)buttons, (void)
 static uint32_t now_ms, held_btn, held_keys, master = 2048;
 static int32_t enc_acc[NE];
 static uint32_t lit_btn, lit_keys, dim_btn, dim_keys;
+static uint32_t lights_b, lights_db;    /* plat_lights' buttons as given (PLAY's green apart), and its glow */
+static int lights_glow;
 
 uint32_t plat_ms(void) { return now_ms; }
 uint32_t plat_buttons(void) { return held_btn | mirror_in_buttons(); }   /* (+ the host's: the mirror's remote) */
@@ -219,9 +233,11 @@ int32_t plat_enc(int role)
     return v;
 }
 uint32_t plat_master(void) { return mirror_in_master(master); }
+int plat_battery(void) { return 3; }   /* (the host and the emulator: full) */
 /* the lights ("leds"): bright, and dim (glow 0: none); PLAY's green counts as PLAY */
 void plat_lights(uint32_t b, uint32_t k, uint32_t db, uint32_t dk, int glow)
 {
+    lights_b = b, lights_db = db, lights_glow = glow;
     lit_btn = (b & ((1u << NB) - 1u)) | (b & LED_PLAY_GREEN ? 1u << B_PLAY : 0u);
     lit_keys = k;
     db = (db & ((1u << NB) - 1u)) | (db & LED_PLAY_GREEN ? 1u << B_PLAY : 0u);
@@ -232,6 +248,13 @@ void plat_lights(uint32_t b, uint32_t k, uint32_t db, uint32_t dk, int glow)
         mirror_leds((b & ((1u << NB) - 1u) & ~play) | (b & (play | LED_PLAY_GREEN) ? play : 0u) |
                     (b & play ? 1u << 15 : 0u), k);
     }
+}
+static uint32_t mid_keys;               /* plat_lights_mid's keys: "leds" (and the browser's web_dim_keys) shows them as
+                                         * the glow */
+void plat_lights_mid(uint32_t b, uint32_t k)
+{
+    (void)b;
+    mid_keys = k & ~lit_keys;
 }
 static int glow_on = 1;                 /* the device's button glow (plat_glow) */
 void plat_glow(int on) { glow_on = on; }
@@ -265,10 +288,14 @@ static void midi_counted(int port, int out, uint32_t pkt)
     midi_t[port][out] = plat_ms() | 1u;
 }
 uint32_t plat_midi_count(int port, int out) { return port >= 0 && port < NPORTS ? midi_n[port][!!out] : 0; }
+static uint32_t ble_listening(void)            /* the Bluetooth links listening, as outs */
+{
+    return (ble_conn ? TO_BLE_HOST : 0u) | (bdev_state == BLE_DEV_READY ? TO_BLE_DEV : 0u);
+}
 /* the host's MIDI out is logged at once and never fills: the device's whole ring free, for whoever listens */
 uint32_t plat_midi_out_room(uint32_t to)
 {
-    return (to & TO_USB) || ((to & TO_BLE) && (ble_conn || bdev_state == BLE_DEV_READY)) ? 64u : 0u;
+    return to & (TO_USB | ble_listening()) ? 64u : 0u;
 }
 static uint32_t usb_links;                      /* plat_midi_out_link: one USB connection, all run long */
 uint32_t plat_midi_out_link(void) { return usb_links; }
@@ -276,24 +303,27 @@ uint32_t plat_midi_ago(int port, int out)
 {
     return port < 0 || port >= NPORTS || !midi_t[port][!!out] ? 0xFFFFFFFFu : plat_ms() - midi_t[port][!!out];
 }
-int plat_midi_in(uint32_t *pkt, int *port)       /* the script's "midi" */
+static uint32_t midi_in_from;
+uint32_t plat_midi_in_from(void) { return midi_in_from; }
+int plat_midi_in(uint32_t *pkt, int *port)       /* the script's "midi" (BLE-DEV's on cable 1, as radio.c has them) */
 {
     int p;
+    uint32_t q;
     if (mi_r == mi_w)
         return 0;
     p = (int)min_port[mi_r % MQ];
     if (port)
         *port = p;
-    *pkt = min_q[mi_r++ % MQ];
+    q = min_q[mi_r++ % MQ];
+    midi_in_from = p == PORT_USB ? TO_USB : p != PORT_BLE ? 0u : (q >> 4 & 0xFu) == 1u ? TO_BLE_DEV : TO_BLE_HOST;
+    *pkt = q & ~0xF0u;
     if (p >= 0 && p < NPORTS)
         midi_counted(p, 0, *pkt);
     return 1;
 }
 void plat_midi_send(uint32_t pkt, uint32_t to)
 {
-    to &= TO_USB | TO_BLE;
-    if ((to & TO_BLE) && !ble_conn && bdev_state != BLE_DEV_READY)   /* as the device: nothing queues for no one */
-        to &= ~TO_BLE;
+    to &= TO_USB | ble_listening();               /* as the device: nothing queues for a link not there */
     if (!to)
         return;
     if (to & TO_USB)
@@ -310,9 +340,16 @@ void plat_midi_send(uint32_t pkt, uint32_t to)
         return;
     }
     if (midi_log)
-        fprintf(midi_log, "%u ms: %02X %02X %02X ->%s%s\n", now_ms, (pkt >> 8) & 0xFF, (pkt >> 16) & 0xFF,
-                (pkt >> 24) & 0xFF, to & TO_USB ? " USB" : "", to & TO_BLE ? " BLE" : "");
+        fprintf(midi_log, "%u ms: %02X %02X %02X ->%s%s%s\n", now_ms, (pkt >> 8) & 0xFF, (pkt >> 16) & 0xFF,
+                (pkt >> 24) & 0xFF, to & TO_USB ? " USB" : "", to & TO_BLE_HOST ? " BLE" : "",
+                to & TO_BLE_DEV ? " BLE-DEV" : "");
 }
+
+/* the USB MIDI host: the simulator has no USB port */
+void plat_usb_host(int on) { (void)on; }
+int plat_usb_host_state(void) { return USBH_OFF; }
+int plat_usb_host_msg(void) { return USBH_MSG_NONE; }
+int plat_usb_lost(void) { return 0; }
 
 /* Bluetooth (FM1B_BLE): a stand-in for the stack, ready a second after the start, and its log */
 static uint32_t ble_t0;
@@ -382,6 +419,7 @@ void plat_ble_disconnect(void)
     bdev_state = BLE_DEV_OFF;
 }
 int plat_ble_device(void) { return bdev_state; }
+int plat_ble_passkey(void) { return -1; }
 void plat_ble_enable(int on)
 {
     if (!on) {
@@ -430,6 +468,7 @@ const char *plat_wifi_ssid(void) { return wf_ssid; }
 uint32_t plat_wifi_ip(void) { return wf_st == WIFI_CONNECTED ? 0x2A01A8C0u : 0; }   /* 192.168.1.42 */
 int plat_wifi_rssi(void) { return wf_st == WIFI_CONNECTED ? -48 : 0; }
 int plat_wifi_scan(void) { return wf_st >= WIFI_ON ? 0 : -1; }
+int plat_wifi_found_channel(int i) { return wf_st >= WIFI_ON && i >= 0 && i <= 1 ? (i ? 11 : 6) : 0; }
 int plat_wifi_found(int i, char *ssid, int *rssi, int *secured)
 {
     static const char *const N[2] = {"Home", "Cafe"};
@@ -496,12 +535,17 @@ void plat_log(const char *line) { ble_say(line); }
 /* the data area and its two more windows (plat.h): a simulated flash from the first window to the last (the gap
  * between, the update's staging, refused as on the device), erased at the start, kept across a simulated reboot */
 #define DATA_BASE PLAT_XDATA0_LO
+#ifdef PLAT_DATA_AREA
+static uint8_t *const data_area = PLAT_DATA_AREA;   /* the embedder's own (host/rfm1.c: in its flash image) */
+#else
 static uint8_t data_area[PLAT_XDATA1_HI - DATA_BASE];
+#endif
 static uint8_t data_ready;
+static uint32_t data_writes;            /* every erase and write */
 static void data_init(void)
 {
     if (!data_ready) {
-        memset(data_area, 0xFF, sizeof data_area);
+        memset(data_area, 0xFF, PLAT_XDATA1_HI - DATA_BASE);
         data_ready = 1;
     }
 }
@@ -516,6 +560,7 @@ int plat_data_erase(uint32_t off)
     if ((off & 0xFFFu) || !PLAT_DATA_OK(off, 0x1000u))
         return -1;
     memset(&data_area[off - DATA_BASE], 0xFF, 0x1000u);
+    data_writes++;
     return 0;
 }
 int plat_data_write(uint32_t off, const void *src, uint32_t n)
@@ -526,6 +571,7 @@ int plat_data_write(uint32_t off, const void *src, uint32_t n)
         return -1;
     for (i = 0; i < n; i++)                       /* as flash: bits only go from 1 to 0 */
         data_area[off - DATA_BASE + i] &= ((const uint8_t *)src)[i];
+    data_writes++;
     return 0;
 }
 void plat_sysex_send(const uint8_t *frame, uint32_t n) { (void)frame, (void)n; }
@@ -549,6 +595,11 @@ static void store_ready(void)             /* the flash starts empty: once, on fi
     done = 1;
     for (i = 0; i < OBJ_NOBJ; i++)
         store_len[i] = -1;
+}
+const uint8_t *plat_chip_uid(void)
+{
+    static const uint8_t U[16] = {0x46, 0x4D, 0x31, 0x2D, 0x68, 0x6F, 0x73, 0x74};   /* "FM1-host" */
+    return U;
 }
 int plat_store_load(uint32_t obj, void *dst, uint32_t max)
 {
@@ -589,6 +640,34 @@ int plat_store_save(uint32_t obj, const void *src, uint32_t len)
 static uint32_t cpu_pct;
 uint32_t plat_cpu_pct(void) { return cpu_pct; }
 uint32_t plat_xruns(void) { return 0; }
+uint32_t plat_ticks24(void)                     /* the host's monotonic clock, at the device's rate */
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint32_t)t.tv_sec * (PLAT_TICKS_PER_US * 1000000u) + (uint32_t)t.tv_nsec / 1000u * PLAT_TICKS_PER_US +
+           (uint32_t)t.tv_nsec % 1000u * PLAT_TICKS_PER_US / 1000u;
+}
+
+#if FM1B_CPU2 && !defined(APP_HOST_CPU2)
+/* the second core, simulated: a job runs at once, in order (the same sums as the device's split) */
+static int cpu2_on;
+int plat_cpu2_set(int on) { cpu2_on = on; return 0; }
+int plat_cpu2_on(void) { return cpu2_on; }
+int plat_cpu2_run(void (*fn)(uint32_t), uint32_t arg)
+{
+    if (!cpu2_on)
+        return 0;
+    fn(arg);
+    return 1;
+}
+int plat_cpu2_wait(void) { return 0; }
+void plat_cpu2_sync(void) {}
+int plat_cpu2_busy(void) { return 0; }
+int plat_cpu2_gave_up(void) { return 0; }
+uint32_t plat_cpu2_bad(void) { return 0; }
+int plat_cpu2_barred(void) { return 0; }
+uint32_t plat_cpu2_stack(void) { return 0; }
+#endif
 
 /* -------------------------------------------------------------- app --- */
 #define ANN_NAME APP_NAME " " APP_VERSION
@@ -935,41 +1014,74 @@ static void boot(void)
     app_ui_init();
 }
 
+/* one millisecond of the device, in three steps (run_ms; host/rfm1.c calls them on its host's clock): the clock and
+ * what runs before the render (sim_ms_begin), the APP_BLOCK-frame renders that have fallen due (sim_render, each),
+ * then the UI (sim_ms_end: a frame every 16 ms, else the input only) */
+static void sim_ms_begin(uint32_t ms)
+{
+    now_ms = ms;
+    ble_tick();
+#if FM1B_WIFI
+    wifi_tick();
+#endif
+#if defined APP_KEY_SENSE
+    if (sense_on)
+        app_host_tick();                        /* the keys' readings, as the scan hands them over */
+#endif
+#ifdef APP_TICK
+    app_tick();                                 /* 1 kHz, as the device's timer runs it */
+#endif
+#ifdef APP_LOOP
+    app_loop();
+#endif
+}
+
+static void sim_render(int32_t *blk)            /* one APP_BLOCK-frame block, as the device renders it */
+{
+    double t0 = now_ns(), dt;
+    uint32_t k;
+    app_render(blk, APP_BLOCK, uac_full ? 4096u : APP_GAIN(master));
+    if (uac_full) {                             /* (the USB audio input took it at full level) the speaker: MASTER */
+        const float g = (float)APP_GAIN(master) * (1.0f / 4096.0f);
+        for (k = 0; k < 2u * APP_BLOCK; k++)
+            blk[k] = (int32_t)((float)blk[k] * g);
+    }
+    dt = now_ns() - t0;
+    render_ns_total += dt;
+    render_budget_ns_total += APP_BLOCK * 1e9 / 44100.0;
+    cpu_pct = (uint32_t)(100.0 * dt / (APP_BLOCK * 1e9 / 44100.0));
+}
+
+static void sim_ms_end(int frame)
+{
+    if (sim_listen && now_ms % 2000u == 0) {        /* the reader's HELLO, as it sends it */
+        static const uint8_t HELLO[] = {ANN_H0, ANN_H1, ANN_H2, ANN_HELLO, ANN_VER};
+        ann_frame(HELLO, sizeof HELLO, now_ms);
+    }
+    if (frame)
+        app_frame();
+    else
+        app_input_only();
+#if FM1B_MIRROR
+    mirror_step();
+    host_mirror_ms();
+#endif
+#ifdef APP_HOST_MS
+    app_host_ms();
+#endif
+}
+
 static void run_ms(uint32_t ms)
 {
     static int32_t blk[2 * APP_BLOCK];
     uint32_t i, k;
     for (i = 0; i < ms; i++) {
-        now_ms++;
-        ble_tick();
-#if FM1B_WIFI
-        wifi_tick();
-#endif
-#if defined APP_KEY_SENSE
-        if (sense_on)
-            app_host_tick();                        /* the keys' readings, as the scan hands them over */
-#endif
-#ifdef APP_TICK
-        app_tick();                                 /* 1 kHz, as the device's timer runs it */
-#endif
-#ifdef APP_LOOP
-        app_loop();
-#endif
+        sim_ms_begin(now_ms + 1u);
         while (audio_due_ms <= (double)now_ms) {      /* APP_BLOCK-frame blocks, as the device renders them */
-            double t0 = now_ns(), dt;
-            app_render(blk, APP_BLOCK, uac_full ? 4096u : APP_GAIN(master));
-            if (uac_full) {                         /* (the USB audio input took it at full level) the speaker: MASTER */
-                const float g = (float)APP_GAIN(master) * (1.0f / 4096.0f);
-                for (k = 0; k < 2u * APP_BLOCK; k++)
-                    blk[k] = (int32_t)((float)blk[k] * g);
-            }
+            sim_render(blk);
 #ifdef PLAT_WEB
             web_audio(blk, APP_BLOCK);
 #endif
-            dt = now_ns() - t0;
-            render_ns_total += dt;
-            render_budget_ns_total += APP_BLOCK * 1e9 / 44100.0;
-            cpu_pct = (uint32_t)(100.0 * dt / (APP_BLOCK * 1e9 / 44100.0));
             for (k = 0; k < APP_BLOCK; k++) {
                 float l = (float)blk[2 * k] / 8388608.0f, r = (float)blk[2 * k + 1] / 8388608.0f;
                 int16_t s[2];
@@ -986,23 +1098,12 @@ static void run_ms(uint32_t ms)
             }
             audio_due_ms += APP_BLOCK * 1000.0 / 44100.0;
         }
-        if (sim_listen && now_ms % 2000u == 0) {        /* the reader's HELLO, as it sends it */
-            static const uint8_t HELLO[] = {ANN_H0, ANN_H1, ANN_H2, ANN_HELLO, ANN_VER};
-            ann_frame(HELLO, sizeof HELLO, now_ms);
-        }
         if (now_ms >= ui_due) {
             ui_due = now_ms + 16;
-            app_frame();
+            sim_ms_end(1);
         } else {
-            app_input_only();
+            sim_ms_end(0);
         }
-#if FM1B_MIRROR
-        mirror_step();
-        host_mirror_ms();
-#endif
-#ifdef APP_HOST_MS
-        app_host_ms();
-#endif
     }
 }
 
@@ -1037,16 +1138,22 @@ static uint32_t mk_pkt(const char *a, const char *b, const char *c)
     return cin | st << 8 | d1 << 16 | d2 << 24;
 }
 static const char *const PORT_N[NPORTS] = {"USB", "BLE", "TRS"};
-static int expect_out(const char *port, uint32_t pkt)   /* this message went out to PORT since the last "out" */
+/* this message went out to PORT since the last "out" (sent 1), or did not (sent 0); PORT BLE is the computer's link
+ * (TO_BLE_HOST), BLE-DEV the device's */
+static int expect_out(const char *port, uint32_t pkt, int sent)
 {
     int p = find_name(PORT_N, NPORTS, port);
-    uint32_t i;
-    for (i = 0; p >= 0 && i < n_out; i++)
-        if (((out_pkt[i] ^ pkt) & 0xFFFFFF00u) == 0 && (out_to[i] >> p & 1u)) {
-            printf("  ok out %02X %02X %02X -> %s\n", (pkt >> 8) & 0xFF, (pkt >> 16) & 0xFF, pkt >> 24, port);
-            return 0;
-        }
-    printf("FAIL expect_out %s %02X %02X %02X: not sent\n", port, (pkt >> 8) & 0xFF, (pkt >> 16) & 0xFF, pkt >> 24);
+    uint32_t to = !strcmp(port, "BLE-DEV") ? TO_BLE_DEV : p >= 0 ? 1u << p : 0u, i;
+    for (i = 0; i < n_out; i++)
+        if (((out_pkt[i] ^ pkt) & 0xFFFFFF00u) == 0 && (out_to[i] & to))
+            break;
+    if (to && (i < n_out) == sent) {
+        printf("  ok %s %02X %02X %02X -> %s\n", sent ? "out" : "not out", (pkt >> 8) & 0xFF, (pkt >> 16) & 0xFF,
+               pkt >> 24, port);
+        return 0;
+    }
+    printf("FAIL %s %s %02X %02X %02X: %s\n", sent ? "expect_out" : "expect_no_out", port, (pkt >> 8) & 0xFF,
+           (pkt >> 16) & 0xFF, pkt >> 24, !to ? "no such port" : sent ? "not sent" : "sent");
     return 1;
 }
 
@@ -1070,6 +1177,10 @@ static int expect(const char *what, const char *val)
         got = (int)clock_out_count;
     else if (!strcmp(what, "midi_out"))
         got = (int)midi_out_count;
+    else if (!strcmp(what, "midi_in_from"))         /* plat_midi_in_from: 1 USB, 2 BLE, 8 BLE-DEV, 0 TRS */
+        got = (int)plat_midi_in_from();
+    else if (!strcmp(what, "room_ble") || !strcmp(what, "room_ble_dev"))   /* plat_midi_out_room of one link */
+        got = (int)plat_midi_out_room(what[8] ? TO_BLE_DEV : TO_BLE_HOST);
     else if (!strcmp(what, "ble"))
         got = ble_state;
     else if (!strcmp(what, "ble_dev"))              /* the Bluetooth MIDI device: BLE_DEV_* (4 connected) */
@@ -1331,8 +1442,8 @@ int main(int argc, char **argv)
             master = (uint32_t)atoi(a);
             run_ms(40);                         /* as the device's smoothing settles */
         } else if (!strcmp(cmd, "midi")) {
-            int p = find_name(PORT_N, NPORTS, a);
-            min_q[mi_w % MQ] = p < 0 ? mk_pkt(a, b, c) : mk_pkt(b, c, d);
+            int dev = !strcmp(a, "BLE-DEV"), p = dev ? PORT_BLE : find_name(PORT_N, NPORTS, a);
+            min_q[mi_w % MQ] = p < 0 ? mk_pkt(a, b, c) : mk_pkt(b, c, d) | (dev ? 0x10u : 0u);   /* cable 1 */
             min_port[mi_w++ % MQ] = p < 0 ? PORT_USB : (uint32_t)p;
             run_ms(2);
         } else if (!strcmp(cmd, "ble")) {
@@ -1354,11 +1465,12 @@ int main(int argc, char **argv)
             uint32_t i;
             for (i = 0; i < n_out; i++)
                 if (((out_pkt[i] >> 8) & 0xFF) != 0xF8)
-                    printf("  out %02X %02X %02X ->%s%s\n", (out_pkt[i] >> 8) & 0xFF, (out_pkt[i] >> 16) & 0xFF,
-                           out_pkt[i] >> 24, out_to[i] & TO_USB ? " USB" : "", out_to[i] & TO_BLE ? " BLE" : "");
+                    printf("  out %02X %02X %02X ->%s%s%s\n", (out_pkt[i] >> 8) & 0xFF, (out_pkt[i] >> 16) & 0xFF,
+                           out_pkt[i] >> 24, out_to[i] & TO_USB ? " USB" : "", out_to[i] & TO_BLE_HOST ? " BLE" : "",
+                           out_to[i] & TO_BLE_DEV ? " BLE-DEV" : "");
             n_out = 0;
-        } else if (!strcmp(cmd, "expect_out")) {
-            fails += expect_out(a, mk_pkt(b, c, d));
+        } else if (!strcmp(cmd, "expect_out") || !strcmp(cmd, "expect_no_out")) {
+            fails += expect_out(a, mk_pkt(b, c, d), !strcmp(cmd, "expect_out"));
         } else if (!strcmp(cmd, "wav")) {
             snprintf(out, sizeof out, "%s/%s", dir, a);
             wav_open(out);
@@ -1443,10 +1555,10 @@ int main(int argc, char **argv)
                     printf(" %s", BTN_N[i]);
             printf(" | white ");
             for (i = 0; i < 16; i++)
-                printf("%c", (lit_keys >> HOST_WHITE_K[i] & 1u) ? '#' : (dim_keys >> HOST_WHITE_K[i] & 1u) ? '+' : '.');
+                printf("%c", (lit_keys >> HOST_WHITE_K[i] & 1u) ? '#' : ((dim_keys | mid_keys) >> HOST_WHITE_K[i] & 1u) ? '+' : '.');
             printf(" black ");
             for (i = 0; i < 11; i++)
-                printf("%c", (lit_keys >> HOST_BLACK_K[i] & 1u) ? '#' : (dim_keys >> HOST_BLACK_K[i] & 1u) ? '+' : '.');
+                printf("%c", (lit_keys >> HOST_BLACK_K[i] & 1u) ? '#' : ((dim_keys | mid_keys) >> HOST_BLACK_K[i] & 1u) ? '+' : '.');
             printf("\n");
         } else if (!strcmp(cmd, "expect"))
             fails += expect(a, b);

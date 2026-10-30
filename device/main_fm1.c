@@ -17,16 +17,27 @@ static int32_t abuf[2u * HALF_WORDS] __attribute__((aligned(4)));
 #define DBG_MAGIC 0x44424731u                       /* "DBG1": read with `fm1t memr` */
 struct fm1b_dbg {
     uint32_t magic, halves, max_us, nested, in_audio, late, timer_irqs, ui_frames;
-    uint32_t last_us, cpu_q8, boots, stage;
+    uint32_t last_us, cpu_q12, boots, stage;
     uint32_t crash_seen;                            /* the crash count already reported at a boot */
 } fm1b_dbg __attribute__((section(".noinit")));
 static uint8_t safe_mode;                           /* two failed boots: no audio, USB on (safe_main) */
+int8_t clock_fix;                                   /* fm1_clock_stock() at the start: 0 stock already, 1 set, -1 failed */
+static uint8_t power_boot[4];                       /* ANA_CON0, CON5, CON7, WLDO12_AUTO as the start found them */
+static int8_t power_fix;                            /* fm1_power_stock(): 1 the DC-DC turned on, 0 it was on */
+static uint32_t clock_boot[6];                      /* the clock's registers as the boot loader left them (fm1_clock_read) */
 static uint8_t rails_boot[2], rails_tries;          /* VDC14's and SYSVDD's registers as the boot loader left them, and
                                                      * the raises it took to read back M-VAVE's levels (the log) */
 static uint32_t wdt_stage __attribute__((section(".noinit")));   /* the main loop's step when the watchdog fired:
                                                                   * 2 Bluetooth, 3 the app's loop, 4 USB, 5 a frame,
                                                                   * 6 input (fm1b_dbg.stage) */
 
+#if FM1B_BT_AUDIO
+static int own_bta_feed(const int32_t *o, uint32_t n);   /* bt_own_audio.c */
+static int bta_frame(const uint8_t *p, uint32_t n);
+#endif
+#if FM1B_BLE_OWN && FM1B_BLE_CENTRAL
+static int dev_frame(const uint8_t *p, uint32_t n);   /* bt_own_central.c */
+#endif
 static void render_block(int32_t *o)                /* ALNK0: one half, measured */
 {
     uint32_t t0 = fm1_ticks(), us, budget = HALF_FRAMES * 1000000u / FS;
@@ -72,6 +83,13 @@ static void render_block(int32_t *o)                /* ALNK0: one half, measured
                 for (i = 0; i < 2u * REND_FRAMES; i++)
                     o[2u * k + i] = (int32_t)((float)o[2u * k + i] * g);
             }
+#if FM1B_BT_AUDIO
+            if (own_bta_feed(o + 2u * k, REND_FRAMES)) {   /* Bluetooth audio streams: the FM-1's own output muted */
+                uint32_t i;
+                for (i = 0; i < 2u * REND_FRAMES; i++)
+                    o[2u * k + i] = 0;
+            }
+#endif
         }
     }
     us = (fm1_ticks() - t0) / FM1_TICKS_PER_US;
@@ -79,8 +97,11 @@ static void render_block(int32_t *o)                /* ALNK0: one half, measured
     if (us > budget * 9u / 10u)
         app_overload();                             /* over 90 % of its time: the app sheds what it can */
 #endif
-    fm1b_dbg.cpu_q8 = (fm1b_dbg.cpu_q8 * 15u + (us * 256u) / budget) / 16u;
-    audio_cpu_pct = (fm1b_dbg.cpu_q8 * 100u) >> 8;
+    /* cpu_q12 is the load smoothed over about 16 blocks, in 1/4096 of the budget. The +8 rounds the division, so
+     * a steady load settles within half a percent of its true value from either side. us * 4096 wraps above about
+     * 1 s in one block, which only an interrupt stuck that long reaches: the reading is then wrong until it decays. */
+    fm1b_dbg.cpu_q12 = (fm1b_dbg.cpu_q12 * 15u + us * 4096u / budget + 8u) / 16u;
+    audio_cpu_pct = (fm1b_dbg.cpu_q12 * 100u + 2048u) >> 12;   /* whole percent, rounded to nearest */
     fm1b_dbg.halves++;
     fm1b_dbg.last_us = us;
     if (us > fm1b_dbg.max_us)
@@ -199,9 +220,24 @@ static void hexs(char *b, uint32_t v)
         b[i] = "0123456789ABCDEF"[(v >> (28u - 4u * i)) & 15u];
     b[8] = 0;
 }
+#if FM1B_BLE
+static char *log_dec(char *b, uint32_t v)            /* v in decimal at b; the end */
+{
+    char t[10];
+    int n = 0;
+    do {
+        t[n++] = (char)('0' + v % 10u);
+        v /= 10u;
+    } while (v);
+    while (n)
+        *b++ = t[--n];
+    return b;
+}
+#endif
 
 /* a readout for development over USB-MIDI: F0 7D 4C 47 F7 ("LG") asks; the answer is one frame per line,
- * F0 7D 4C 47 <ASCII> F7: the last crash (count, vector, pc, rets, sp, uptime), the supplies' registers (rails), then
+ * F0 7D 4C 47 <ASCII> F7: the last crash (count, vector, pc, rets, sp, uptime), the supplies' registers (rails), the
+ * power setup's and the clock's as the boot loader left them, then
  * Bluetooth's log, the oldest first (it survives a reset) */
 static void log_line_send(const char *t)
 {
@@ -301,6 +337,55 @@ static int log_frame(const uint8_t *p, uint32_t n)
         *q = 0;
         log_line_send(r);
     }
+    {   /* the power setup as the start found it (fm1_power_stock): "power boot FB 44 A5 C0 fix 0" is M-VAVE's */
+        static const char H[] = "0123456789ABCDEF";
+        char r[40], *q = r;
+        const char *t = "power boot ";
+        uint32_t j;
+        while (*t)
+            *q++ = *t++;
+        for (j = 0; j < 4u; j++) {
+            *q++ = H[power_boot[j] >> 4];
+            *q++ = H[power_boot[j] & 15u];
+            *q++ = ' ';
+        }
+        for (t = "fix "; *t; )
+            *q++ = *t++;
+        *q++ = (char)('0' + power_fix);
+        *q = 0;
+        log_line_send(r);
+    }
+    {   /* the clock as the boot loader left it, and what the start did (fm1_clock.h): "sys 06" is M-VAVE's 360 MHz */
+        char r[44];
+        uint32_t j;
+        const char *t;
+        for (j = 0; j < 3u; j++) {
+            char *q = r;
+            t = j == 0u ? "clock boot sys " : j == 1u ? "clock pll1 " : "clock pll0 ";
+            while (*t)
+                *q++ = *t++;
+            if (j == 0u) {
+                hexs(q, clock_boot[0] << 24);
+                q += 2;
+                for (t = " mux "; *t; )
+                    *q++ = *t++;
+                hexs(q, clock_boot[1]);
+                q += 8;
+                for (t = " fix "; *t; )
+                    *q++ = *t++;
+                *q++ = clock_fix < 0 ? '-' : ' ';
+                *q++ = (char)('0' + (clock_fix < 0 ? -clock_fix : clock_fix));
+            } else {
+                hexs(q, clock_boot[2u * j]);
+                q += 8;
+                *q++ = ' ';
+                hexs(q, clock_boot[2u * j + 1u]);
+                q += 8;
+            }
+            *q = 0;
+            log_line_send(r);
+        }
+    }
     if (wdt_stage) {
         static const char *const ST[7] = {"?", "?", "Bluetooth", "the app's loop", "USB", "a frame", "input"};
         char *q = b;
@@ -354,6 +439,81 @@ static int log_frame(const uint8_t *p, uint32_t n)
         hexs(q, shim_off_from);
         log_line_send(b);
         shim_off_max = 0;
+    }
+#if FM1B_BLE_OWN
+    {   /* the own stack's link layer: advertising events, connections taken / refused, packets good / CRC bad,
+         * links closed : the last reason, the longest BLE interrupt (us) */
+        q = b;
+        for (const char *l = "BT ll "; *l;)
+            *q++ = *l++;
+        q = log_dec(q, ble_dg.adv_events);
+        *q++ = ' ';
+        q = log_dec(q, ble_dg.cind_ok);
+        *q++ = '/';
+        q = log_dec(q, ble_dg.cind_rej);
+        *q++ = ' ';
+        q = log_dec(q, ble_dg.rx_good);
+        *q++ = '/';
+        q = log_dec(q, ble_dg.rx_crc_bad);
+        *q++ = ' ';
+        q = log_dec(q, ble_dg.closes);
+        *q++ = ':';
+        q = log_dec(q, ble_dg.close_reason);
+        *q++ = ' ';
+        q = log_dec(q, ble_dg.isr_max_us);
+        *q = 0;
+        log_line_send(b);
+    }
+#else
+    {   /* the radio's tasks' deepest stacks and its heap's most, now (the "stacks" lines may have scrolled away) */
+        extern int shim_stack_depth(int task);
+        extern uint32_t shim_heap_peak;
+        extern const uint32_t shim_heap_size;
+        int k;
+        const char *l = "BT stacks ";
+        q = b;
+        while (*l)
+            *q++ = *l++;
+        for (k = 1; k <= 3; k++) {
+            q = log_dec(q, (uint32_t)shim_stack_depth(k) * 256u);
+            *q++ = ' ';
+        }
+        for (l = "heap "; *l;)
+            *q++ = *l++;
+        q = log_dec(q, shim_heap_peak);
+        *q++ = '/';
+        q = log_dec(q, shim_heap_size);
+        *q = 0;
+        log_line_send(b);
+    }
+#endif
+    {   /* the clock by Bluetooth since the last read: ticks, the sender's gaps between them (ms), how many of
+         * those 0 (a packet's one time for all), the most late one, and the lateness allowed now */
+        extern uint32_t bj_gap_min, bj_gap_max, bj_gap_zero, bj_ticks, bj_rel_max;
+        extern uint32_t ble_jitter_late(void);
+        const char *l;
+        q = b;
+        for (l = "BT clk "; *l;)
+            *q++ = *l++;
+        q = log_dec(q, bj_ticks);
+        for (l = " gap "; *l;)
+            *q++ = *l++;
+        q = log_dec(q, bj_ticks > 1u ? bj_gap_min : 0u);
+        *q++ = '.';
+        *q++ = '.';
+        q = log_dec(q, bj_gap_max);
+        for (l = " z "; *l;)
+            *q++ = *l++;
+        q = log_dec(q, bj_gap_zero);
+        for (l = " late "; *l;)
+            *q++ = *l++;
+        q = log_dec(q, bj_rel_max);
+        *q++ = '/';
+        q = log_dec(q, ble_jitter_late());
+        *q = 0;
+        log_line_send(b);
+        bj_gap_min = 0xFFFFu;
+        bj_gap_max = bj_gap_zero = bj_ticks = bj_rel_max = 0;
     }
 #endif
     log_line_send("end");
@@ -516,7 +676,9 @@ static int wifi_frame(const uint8_t *p, uint32_t n)
             if (!plat_wifi_found(i, ssid, &rssi, &sec))
                 break;
             q = wifi_num(b, rssi, e);
-            q = wifi_cat(q, sec ? " 1 " : " 0 ", e);
+            q = wifi_cat(q, sec ? " 1 ch" : " 0 ch", e);   /* signal, secured, channel, name */
+            q = wifi_num(q, plat_wifi_found_channel(i), e);
+            q = wifi_cat(q, " ", e);
             wifi_cat(q, ssid, e);
             wifi_line(b);
         }
@@ -615,11 +777,12 @@ static void enter_uboot(const char *why)
 
 /* SAFE MODE: the app crashed (or hung) twice while starting. Nothing that makes sound runs: no audio,
  * no engine, no UI; USB is on, so the web installer (this firmware's, or the stock one) and M-UPGRADE can
- * reach it. PLAY tries the app again. The chip's own update mode stays the last resort (fm1_cstart). */
+ * reach it. PLAY tries the app again, REC the chip's own update mode (as at power-on); it stays the last resort too
+ * (fm1_cstart). */
 static void safe_main(void)
 {
     char b[24];
-    uint32_t t0, play;
+    uint32_t t0, play, rec;
     lcd_fill(0, 0, 240, 240, C_BLACK);
     sys_box(0, 18, 240, SYS_B, APP_NAME " SAFE MODE", C_HI, 1);
     sys_box(0, 52, 240, SYS_S, "IT CRASHED TWICE", C_WHITE, 1);
@@ -628,6 +791,7 @@ static void safe_main(void)
     sys_box(0, 122, 240, SYS_S, "REINSTALL FROM THE", C_WHITE, 1);
     sys_box(0, 142, 240, SYS_S, "WEB INSTALLER.", C_WHITE, 1);
     sys_box(0, 172, 240, SYS_S, "PLAY: TRY AGAIN", C_HI, 1);
+    sys_box(0, 190, 240, SYS_S, "REC: UPDATE MODE", C_HI, 1);
     if (fm1_crash.magic == FM1_CRASH_MAGIC) {
         b[0] = 'P';
         b[1] = 'C';
@@ -642,6 +806,7 @@ static void safe_main(void)
     fm1_guard_lock_top();
     fm1_irq_enable_all();
     play = 1u << panel.btn[B_PLAY];
+    rec = 1u << panel.btn[B_REC];
     t0 = fm1_ms;
     for (;;) {
         fm1_wdt_feed();
@@ -670,6 +835,8 @@ static void safe_main(void)
         }
         if (usb.uboot_req)
             enter_uboot("UBOOT (USB)");
+        if ((fm1_in.buttons & rec) && fm1_ms - t0 > 500u)
+            enter_uboot("UPDATE MODE (REC)");
     }
 }
 
@@ -694,6 +861,9 @@ static void splash(void)                           /* the app's (APP_SPLASH), or
 static void fm1_main(void)
 {
     int32_t knob = 512 * 16;
+#if !BOARD_SMK37
+    uint32_t batt_t = 0;                            /* (the battery's last reading, fm1_ms) */
+#endif
     uint32_t last_frame = 0;
     {
         uint32_t f = irq_save();
@@ -708,10 +878,24 @@ static void fm1_main(void)
                                                     /* then 1.38 V (fm1_sys.h). At the boot loader's, flash fetches
                                                      * come back corrupted under load: the radio's trim crashed
                                                      * CTL-1 0.6 s into most Bluetooth starts */
+        power_boot[0] = fm1_p33_read(FM1_P3_ANA_CON0);
+        power_boot[1] = fm1_p33_read(FM1_P3_ANA_CON5);
+        power_boot[2] = fm1_p33_read(FM1_P3_ANA_CON7);
+        power_boot[3] = fm1_p33_read(FM1_P3_WLDO12_AUTO);
+        fm1_clock_read(clock_boot);
 #if BOARD_SMK37
+        /* the SMK-37 keeps the clock and supplies its own boot loader set: M-VAVE's for it (SMK37 OPEN's boot-config.bin:
+         * a higher SYS_CLK than the FM-1's, DVDD 15, DCDC14 7). The FM-1's stock values are not put over them */
         flash_ok = FL_JEDEC_OK(FL_FAR(fl_jedec_ram)());   /* the SMK-37's part (fm1_flash_smk37.h), else RAM only */
 #else
+        power_fix = (int8_t)fm1_power_stock();      /* the rest of M-VAVE's power setup: the 1.3 V supply on its DC-DC,
+                                                     * VDDIO 3.2 V, WiFi's regulator automatic (fm1_sys.h) */
+        clock_fix = (int8_t)fm1_clock_stock();      /* the stock 360 MHz, whichever bootloader started us (fm1_clock.h) */
         flash_ok = FL_FAR(fl_jedec_ram)() == 0x856014u;   /* the expected 1 MiB part, else RAM only */
+#endif
+#if FM1B_WIFI || FM1B_BLE
+        if (flash_ok)
+            FL_FAR(fl_uid_ram)(flash_uid);
 #endif
         irq_restore(f);
         if (flash_ok) {
@@ -756,7 +940,14 @@ static void fm1_main(void)
 #endif
     panel_init();
     led_pos_init();
+#if FM1B_CPU2
+    cpu2_boot();
+    cpu2_booting = 1;                               /* (plat_cpu2_set: the second core starts in app_init or never) */
+#endif
     app_init();                                     /* the app's engine and its saved state (or defaults) */
+#if FM1B_CPU2
+    cpu2_booting = 0;
+#endif
     audio_init();
     usb_start();
 #if FM1B_TRS
@@ -774,6 +965,10 @@ static void fm1_main(void)
     if ((fm1_in.buttons & 3u) == 3u)
 #endif
         panel_setup();                              /* OCT- + OCT+ held at power-on */
+    if (fm1_in.buttons & (1u << panel.btn[B_REC]))
+        enter_uboot("UPDATE MODE (REC)");           /* REC held at power-on: the chip's update mode, the same key as
+                                                     * m-bootloader's (which takes it first when it is installed): a way
+                                                     * in when this firmware starts but its USB cannot be reached */
     fm1_delay_ms(400);
     radio_boot_note();                                /* what ended the last Bluetooth run, into its log */
     if (!radio_last_bad && APP_BLE_AT_BOOT)
@@ -790,6 +985,9 @@ static void fm1_main(void)
 
     for (;;) {
         fm1_wdt_feed();
+#if FELUCCA_USB_HOST
+        usb_host_task(fm1_ms);                      /* the host's mode change and connecting (plat_usb_host) */
+#endif
         usb_retry(fm1_ms);
         if (fm1_ms > 30000u && bootguard.pending) {     /* a crash or hang in the first 30 s counts */
             bootguard.pending = 0;
@@ -807,6 +1005,14 @@ static void fm1_main(void)
                 master_pos = mirror_in_master(remote.master >= 0 ? (uint32_t)remote.master : (uint32_t)(knob / 4));
             }
         }
+#if !BOARD_SMK37                                    /* (the SMK-37: no battery, its ADC channels its own) */
+        if (!fm1_an.con && !fm1_an.pend && fm1_ms - batt_t >= 100u) {   /* the battery, ten times a second (plat_battery) */
+            int32_t b = fm1_adc_read(FM1_ADC_BATT);
+            batt_t = fm1_ms;
+            if (b > 0)
+                batt_raw = batt_raw ? batt_raw + (b - batt_raw) / 16 : b;
+        }
+#endif
         fm1b_dbg.stage = 2;                         /* (breadcrumbs: where a watchdog reset found the loop) */
         ble_poll();                                 /* Bluetooth's tasks, once started */
 #if FM1B_WIFI
@@ -816,31 +1022,18 @@ static void fm1_main(void)
 #ifdef APP_LOOP
         app_loop();                                 /* the app's background (a radio's tasks) */
 #endif
-        {   /* OCT- + OCT+ held 5 s: update mode (Felucca's, unchanged) */
-            static uint32_t t0, shown;
-            uint32_t both = (1u << panel.btn[B_OCTDN]) | (1u << panel.btn[B_OCTUP]);
-            if ((fm1_in.buttons & both) != both) {
-                if (shown)
-                    app_say("UPDATE MODE", "CANCELLED");
-                shown = 0;
-                t0 = fm1_ms;
-            } else if (fm1_ms - t0 > 2000u && fm1_ms - t0 <= 5000u) {
-                uint32_t left = (5000u - (fm1_ms - t0) + 999u) / 1000u;
-                if (left != shown) {
-                    char d[4] = {(char)('0' + left), '.', '.', 0};
-                    app_say("UPDATE MODE IN", d);
-                    shown = left;
-                }
-            } else if (fm1_ms - t0 > 5000u) {
-                enter_uboot("UBOOT");
-            }
-        }
         {   /* a screen reader's SysEx (announce.c), before the updater looks */
             const uint8_t *p;
             uint32_t n;
             if (ota_frame_get(&p, &n) && (ann_frame(p, n, fm1_ms) || log_frame(p, n) || remote_frame(p, n)
 #if FM1B_WIFI
                                           || wifi_frame(p, n)
+#endif
+#if FM1B_BT_AUDIO
+                                          || bta_frame(p, n)
+#endif
+#if FM1B_BLE_OWN && FM1B_BLE_CENTRAL
+                                          || dev_frame(p, n)
 #endif
 #ifdef APP_SYSEX
                                           || app_sysex(p, n)
@@ -890,6 +1083,10 @@ static void fm1_main(void)
 void fm1_cstart(void)
 {
     uint32_t *s, *d, p3, src, wdt;
+#if FM1B_CPU2
+    fm1_cpu1_stop();                                /* a second core that a reset left running would read the RAM
+                                                     * cleared below: held (registers only) */
+#endif
 #ifdef APP_CSTART
     app_cstart();                                   /* the app's, before the RAM is cleared (registers only: a second
                                                      * core a reset left running, held) */

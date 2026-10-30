@@ -18,12 +18,14 @@
  *                           FM-1 2026-10-16: no lost frame); FM1B_UAC_48K 0 (48 kHz too: needs the resampler's filter)
  *   FM1B_UAC_DEEP 0         1: the USB audio input keeps a half more in hand, for renders that take most of
  *                           their time (its 4 KB ring in the app's pool; 5.8 ms more latency)
+ *   FM1B_UAC_RING_POOL 0    1: the USB audio input's 2 KB ring in the pool, its RAM left to the app
  *   FM1B_UAC_OUT 1          USB audio output: the computer plays through the FM-1, mixed after the app, at MASTER
  *   FM1B_TRS 1              MIDI in on the TRS jack
  *   APP_TOUCH               velocity and pressure from the keys (lib/touch.h)
  *   FM1B_BLE 0              Bluetooth MIDI (fm1.toml ble = true; tools/build.py --no-ble leaves it out)
  *   FM1B_MIRROR 0           the screen and panel mirrored over USB (fm1.toml mirror = true: mirror.c)
- *   FM1B_BACKUP 0           backup and restore of the app's objects over USB (fm1.toml backup = true: backup.c) */
+ *   FM1B_BACKUP 0           backup and restore of the app's objects over USB (fm1.toml backup = true: backup.c)
+ *   FM1B_CPU2 0             the second core (fm1.toml cpu2 = true: cpu2.c, felucca-bsp's fm1_cpu1.h) */
 #include <stdint.h>
 #include "plat.h"
 #include "app.h"                  /* first: the scan's hooks below may call the app */
@@ -52,9 +54,13 @@ static void smk_pad_event(uint32_t pad, uint32_t vel);
 #include "fm1_audio.h"
 #include "fm1_adc.h"
 #include "fm1_lcd_hw.h"
+#if FM1B_WIFI || FM1B_BLE
+#define FL_UID 1                          /* the flash's unique ID: the WiFi MAC, the Bluetooth name (plat_chip_uid) */
+#endif
 #include "fm1_flash.h"
 #include "fm1_xip.h"
 #include "fm1_perf.h"
+#include "fm1_clock.h"
 
 #include "libc.c"
 #include "lcd.c"
@@ -92,7 +98,11 @@ static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIME
                                    * otherwise run its ring dry: holds in the recording); its 4 KB ring in the pool */
 #endif
 #define FELUCCA_UAC_DEEP FM1B_UAC_DEEP
-#if FM1B_UAC_DEEP
+#ifndef FM1B_UAC_RING_POOL
+#define FM1B_UAC_RING_POOL 0      /* 1: the USB audio input's ring (2 KB; deep: 4) in the pool, not in RAM (an app whose
+                                   * RAM is full: fm1-radio) */
+#endif
+#if FM1B_UAC_DEEP || FM1B_UAC_RING_POOL
 #define FELUCCA_UAC_RING_ATTR PLAT_POOL
 #endif
 #ifndef FELUCCA_ID
@@ -104,7 +114,14 @@ static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIME
 #ifndef FM1B_BACKUP
 #define FM1B_BACKUP 0
 #endif
+#ifndef FM1B_CPU2
+#define FM1B_CPU2 0
+#endif
 #define FELUCCA_MIRROR FM1B_MIRROR /* usb.c's ring for mirror.c's frames */
+#ifndef FM1B_USB_HOST
+#define FM1B_USB_HOST 0
+#endif
+#define FELUCCA_USB_HOST FM1B_USB_HOST /* the USB MIDI host (plat_usb_host) */
 #define SXQ 128u                  /* the SysEx send ring, in packets: a whole screen-reader SAY (ANN_MAX + 9 bytes) */
 #include "usb.c"
 #ifndef FM1B_TRS
@@ -122,6 +139,9 @@ static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIME
 #endif
 
 static uint8_t flash_ok;          /* JEDEC id matched at boot */
+#if FM1B_WIFI || FM1B_BLE
+static uint8_t flash_uid[16];     /* the flash's factory unique ID (plat_chip_uid), read at boot */
+#endif
 static void audio_silence(void);
 static int st_read(uint32_t off, void *dst, uint32_t n)   /* 256-byte IRQ-off windows: audio keeps up */
 {
@@ -275,6 +295,9 @@ static void mirror_enc(int role, int32_t n) { (void)role, (void)n; }
 static void mirror_leds(uint32_t buttons, uint32_t keys) { (void)buttons, (void)keys; }
 #endif
 #include "plat_fm1.c"
+#if FM1B_CPU2
+#include "cpu2.c"                 /* the second core: plat_cpu2_* */
+#endif
 #if FM1B_BACKUP
 #include "backup.c"               /* backup and restore of the app's objects over USB (tools/fm1_backup.py) */
 static uint8_t backup_streaming(void) { return bu.on; }

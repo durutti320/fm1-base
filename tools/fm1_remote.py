@@ -12,8 +12,8 @@ or by a program (an agent). Needs mido with python-rtmidi.
     wait MS                                 let it run (with listen: print what it says meanwhile)
     listen                                  a screen reader starts listening: every message it says is printed
     screen                                  what is on the screen, in words (the screen reader's channel)
-    log                                     the last crash, the registers at the last four, the supplies, and the
-                                            radio's log
+    log                                     the last crash, the registers at the last four, the supplies, the
+                                            clock as the boot loader left it, and the radio's log
                                             (all survive a restart)
     release-all                             every button and key up, MASTER the pot's own
     wifi on | wifi off | wifi scan          WiFi (a firmware with wifi = true): on, off, look for networks
@@ -21,6 +21,13 @@ or by a program (an agent). Needs mido with python-rtmidi.
                                             the networks kept
     wifi join SSID [PASSWORD]               join a network (kept once joined); no password: a kept one's, or none
     wifi forget N                           forget the network kept at N (0 = the most recent)
+    bta on | bta off | bta scan             Bluetooth audio (ble_stack = "own" with bt_audio = true): on, off, look
+    bta status | bta found | bta known      for headphones and speakers; its state; the devices found; remembered
+    bta pick N | bta connect N              connect found device N / remembered device N (0 = the last one)
+    bta hangup | bta forget N               end the link; forget remembered device N
+    dev scan | dev stop | dev found         Bluetooth MIDI devices (ble_stack = "own", ble_central = true): look for
+    dev connect N | dev disconnect          them, list them, connect to found device N, let go
+    dev status                              its state, the last failure and its code
   e.g.  tools/fm1_remote.py tap REC wait 800 screen
 
 The firmware's side: device/main_fm1.c remote_frame (F0 7D 4C 43 ...), log_frame (F0 7D 4C 47), wifi_frame
@@ -35,6 +42,11 @@ BTN = ["FX", "SEL", "ENV", "LFO", "EDIT", "GLO", "HOME", "SAVE", "ARP", "SEQ", "
 ENC = ["SELECT", "ALGO", "PRESET", "K1", "K2", "K3", "K4"]
 LC, LG, LW, SR = [0x7D, 0x4C, 0x43], [0x7D, 0x4C, 0x47], [0x7D, 0x4C, 0x57], [0x7D, 0x53, 0x52]
 WIFI_OP = {"on": 1, "off": 2, "scan": 3, "status": 4, "saved": 5, "forget": 6, "join": 7, "found": 8}
+LA = [0x7D, 0x4C, 0x41]                    # Bluetooth audio (device/bt_own_audio.c bta_frame)
+BTA_OP = {"on": 1, "off": 2, "scan": 3, "status": 4, "found": 5, "pick": 6, "connect": 7, "known": 8, "hangup": 9,
+          "forget": 10}
+LD = [0x7D, 0x4C, 0x44]                    # Bluetooth MIDI devices, own stack (device/bt_own_central.c dev_frame)
+DEV_OP = {"scan": 1, "stop": 2, "found": 3, "connect": 4, "disconnect": 5, "status": 6}
 
 
 def nibbles(text):
@@ -160,6 +172,26 @@ class FM1:
                 for f in self.frames(LW, 3.0, until=lambda f: f[:1] == b"\x11"):
                     if f[:1] == b"\x10":
                         print("wifi:", f[1:].decode("latin1", "replace"))
+                i += used
+            elif c == "bta":
+                op = BTA_OP.get(a)
+                if op is None:
+                    raise SystemExit(f"bta {a!r}: " + ", ".join(BTA_OP))
+                data, used = ([int(b)], 3) if a in ("pick", "connect", "forget") else ([], 2)
+                self.sysex(LA + [op] + data)
+                for f in self.frames(LA, 3.0, until=lambda f: f[:1] == b"\x11"):
+                    if f[:1] == b"\x10":
+                        print("bta:", f[1:].decode("latin1", "replace"))
+                i += used
+            elif c == "dev":
+                op = DEV_OP.get(a)
+                if op is None:
+                    raise SystemExit(f"dev {a!r}: " + ", ".join(DEV_OP))
+                data, used = ([int(b)], 3) if a == "connect" else ([], 2)
+                self.sysex(LD + [op] + data)
+                for f in self.frames(LD, 3.0, until=lambda f: f[:1] == b"\x11"):
+                    if f[:1] == b"\x10":
+                        print("dev:", f[1:].decode("latin1", "replace"))
                 i += used
             elif c == "release-all":
                 self.btn = self.keys = 0           # a frame at a time: three back to back, the FM-1 may drop one

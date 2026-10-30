@@ -9,6 +9,9 @@
   tools/build.py APP_DIR --web         the browser emulator instead: APP_DIR/build/emu/ (emcc); the page is the
                                        simulator alone (panel, screen, sound, screen reader), for a site to link or frame;
                                        an app may bring its own (APP_DIR/web/emu/index.html, worklet.js)
+  tools/build.py APP_DIR --rfm1        the app as an .rfm1 instead: APP_DIR/build/rfm1/ID-VERSION.rfm1 (emcc), the
+                                       host simulator in WebAssembly for host apps (RemoteFM1 for iOS: RemoteFM1IOS's
+                                       docs/RFM1-FORMAT.md); host/rfm1.c, tools/rfm1_pack.py
 
 APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
   name = "TEMPLATE"          the build's file names (lower case)
@@ -29,19 +32,42 @@ APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
   vendored = ["third_party/"]   other people's libraries, compiled for the FM-1 with their machine-specific code off
                              by flags: the register check skips them entirely (it reads the text: x86 asm behind
                              an #if would fail it)
+  rfm1_memory_mib = 8        the .rfm1's fixed memory (MiB, 1..32; default 8)
+  authors = ["Name"]         the .rfm1 manifest's authors (default: the app repository's first commit's author)
   words = "words.tsv"        the screen reader's words (fm1-reader), relative to APP_DIR
   font_full = ["L"]          font roles with lower case too (by default M and L have capitals and digits only)
+  ble_stack_kb = 6           the Bluetooth tasks' stacks, KB each (default 8: three of them, in the pool; radio.c
+                             logs each one's deepest, "stacks", 10 s after Bluetooth is ready and as they grow)
+  ble_heap_kb = 16           its heap, KB (default 24, in RAM; the same log line's "heap": its most ever)
+  ble_trim = true            Bluetooth as a MIDI peripheral only: JieLi's central, classic and test code cut (flash and
+                             RAM: Melodee's measure ~18 KB and ~4 KB); not with ble_central
+  ble_no_pairing = true      with ble_trim: no pairing or encryption either (~19 KB more flash; iOS and macOS connect)
   ble_central = true         and the FM-1 connects to Bluetooth MIDI devices too (FM1B_BLE_CENTRAL), beside a computer
   usb_audio_in = true        the FM-1 recordable over USB (FM1B_UAC; the default: true)
   usb_audio_out = true       a computer plays through the FM-1 over USB (FM1B_UAC_OUT; the default: true)
+  usb_audio_first = true     the USB audio streaming interfaces listed first in the audio control collection
+                             (felucca-bsp FELUCCA_UAC_AS_FIRST, from Felucca 1.5.1): macOS then shows the FM-1 as an audio
+                             device beside its MIDI; bcdDevice +0.08 (a changed device to the computer)
+  usb_host = true            the USB port as a MIDI host when the app asks (FM1B_USB_HOST: felucca-bsp's
+                             FELUCCA_USB_HOST, docs/USB_HOST.md; plat_usb_host in plat.h): a USB-MIDI controller or
+                             synth, directly or behind one powered hub (the FM-1 gives no power). Boot is a device
   mirror = true              the screen and panel mirrored over USB (FM1B_MIRROR: device/mirror.c; web/mirror/,
                              tools/fm1_mirror.py), the panel played from the host; FM1B_MIRROR=1 in the environment
                              builds it in whatever fm1.toml says (an app's demo build), FM1B_POOL_SPARE=N the
                              pool spare the build insists on (8192 B; a demo build may spend it)
   backup = true              backup and restore of the app's saved objects over USB (FM1B_BACKUP: device/backup.c;
                              tools/fm1_backup.py); app.h gives APP_BACKUP_OBJS, _MAGIC, _VERSION and the app_backup_* hooks
+  cpu2 = true                the second core (FM1B_CPU2: device/cpu2.c, plat_cpu2_* in plat.h, on felucca-bsp's
+                             chip/fm1_cpu1.*): a worker for a part of the render. A failure of it (a misread, a
+                             fault, a late job) restarts the FM-1, the reason in the crash record (Melodee's releases)
+  cpu2_fallback = true       instead, one core after a failure, until power-off (FM1_CPU1_FALLBACK); FM1B_BUILD, a
+                             hash of the sources, lifts that bar for a new build
 Optional parts: only what an fm1.toml asks for is built in (Bluetooth, USB audio; an app's lib/touch by APP_TOUCH in
 app.h); the build prints what it has.
+  ble_stack = "own"          with ble: Optimist's own Bluetooth stack (bt/: Henri David's, docs/bt/BLE-STACK.md;
+                             FM1B_BLE_OWN) instead of JieLi's libraries: nothing of the SDK's linked, no shim
+  ble_pairing = true         with ble_stack = "own": pairing and an encrypted link (LE legacy pairing, Just Works),
+                             the bond kept in OBJ_BLE; without it a pairing is refused (macOS and iOS connect anyway)
   ble = true                 Bluetooth MIDI (FM1B_BLE): ble/ on JieLi's BT libraries, from the AC79 SDK ($AC79_SDK);
                              --no-ble builds without it (NAME-usb.fwsc), and the build checks nothing of JieLi's is in
   wifi = true                WiFi (FM1B_WIFI): a station on JieLi's WiFi libraries and the SDK's lwIP (built from its
@@ -98,7 +124,8 @@ DOCKER_IMAGE = os.environ.get("JIELI_DOCKER_IMAGE", "debian:bookworm-slim")
 CFLAGS = ["-Os", "-ffunction-sections", "-fno-builtin", "-Wall", "-Wno-unused-function"]
 # the AC79's single-precision FPU (the SDK's own flags); no fused multiply-add, so the host
 # build (-ffp-contract=off) computes the same samples
-FPU = ["-mcpu=r3", "-mfprev1", "-ffp-contract=off"]
+CPU = "r3"                          # the core: the compiler, the LTO plugin and objdump (to decode its FPU instructions)
+FPU = [f"-mcpu={CPU}", "-mfprev1", "-ffp-contract=off"]
 LINE = re.compile(r"^\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} )+)\s*\t(.*)$")
 
 # SDK files of AC79NN_SDK_V1.2.1_2023-12-13 (the tested version)
@@ -111,7 +138,9 @@ SDK_SHA256 = {
 PRODUCT = None                      # package identity (fm1.toml id_prefix; see main)
 VERSION = None                      # APP_VERSION for release builds (default: "DEV", device/unity.c)
 BLE = False                         # fm1.toml ble = true, unless --no-ble
+OWN = False                         # with BLE: fm1.toml ble_stack = "own" (bt/, no JieLi library)
 WIFI = False                        # fm1.toml wifi = true
+CPU2 = False                        # fm1.toml cpu2 = true (FM1B_CPU2=0 / 1 in the environment: without / with)
 STEM = None                         # the build's file names: NAME, or NAME-usb (--no-ble)
 # the board (BOARD env or --board): fm1, or smk37 (the M-VAVE SMK-37: felucca-bsp boards/smk37); an SMK build carries its
 # model's name (MODEL env or --model: pro, elite, mke; one keyboard under three names), so the stock updater still
@@ -286,7 +315,7 @@ def build_loader():
     tc("pi32v2/bin/ld", "--gc-sections", "-e", "_start", "-T", src / "loader.ld",
        LDR / "crt0_ldr.o", LDR / "loader.o", "-o", elf)
     _, dis, hdr, syms = tc_all(("common/bin/objcopy", "-O", "binary", "-j", ".text", elf, LDR / "loader.bin"),
-                               ("common/bin/objdump", "-d", elf),
+                               ("common/bin/objdump", "-d", f"-mcpu={CPU}", elf),
                                ("common/bin/objdump", "-h", elf),
                                ("common/bin/objdump", "-t", elf))
     (LDR / "loader.dis").write_text(dis)
@@ -324,6 +353,95 @@ BLE_INC = ["include_lib", "include_lib/driver", "include_lib/driver/device", "in
            "include_lib/utils/event", "include_lib/media", "include_lib/media/cpu/wl82", "apps",
            "apps/demo/demo_ble/include", "apps/common", "apps/common/include", "apps/common/config/include",
            "include_lib/btstack", "include_lib/net", "apps/common/ble/include", "include_lib/newlib/include"]
+# ble_trim = true: what Bluetooth MIDI as a peripheral never runs, cut from JieLi's libraries (after Melodee's
+# ble-spike). They are LLVM 4.0 bitcode linked with LTO, so a function's body replaced (the toolchain's llvm-link
+# -override) lets the optimizer drop everything only it reached ({(library, member): the replacements' C source}); and
+# the SDK's library configuration (compiled here as LTO bitcode: its constants fold into JieLi's code) cut to LE only,
+# one link as a peripheral. Not with ble_central: a central needs the scan, connecting and the GATT client
+BLE_TRIM = {
+    ("btctrler.a", "bredr_link.c.o"): "int link_conn_tx_bulk_avaiable(void) { return 0; }",     # classic's ACL transmit
+    ("btstack.a", "ancs_client.c.o"): "void ancs_client_btstack_init_for_check(void) {}",       # Apple's notifications
+    ("btctrler.a", "ll_scan.c.o"): "int ll_scan_open(void) { return -1; }",                     # the central's scan
+    ("btstack.a", "gatt_client.c.o"):                                       # the GATT client's reads and writes (the
+        "int gatt_client_read_value_of_characteristic_using_value_handle(void) { return 1; }\n"   # server's
+        "int gatt_client_read_long_value_of_characteristic_using_value_handle(void) { return 1; }\n"  # notifications
+        "int gatt_client_write_value_of_characteristic_extend(void) { return 1; }\n"               # stay)
+        "int gatt_client_write_value_of_characteristic_without_response(void) { return 1; }\n"
+        "int gatt_client_discover_characteristic_descriptors_by_handle(void) { return 1; }",
+}
+# Not, as Melodee's spike had them (2026-10-25, on an FM-1): avctp_user.c.o's classic connection bookkeeping
+# (stubbed, the controller never says it is ready: "still starting after 3 s", no Bluetooth), nor link_layer.c.o's
+# ll_create_conn_link (a peripheral makes its link with it too: stubbed, a Mac's connecting crashed the FM-1 in
+# ble_hw_tx, r0 = 0, from ble_event_irq_handler)
+BLE_CONFIG = {"apps/common/config/log_config/lib_btctrler_config.c": [
+    (r"(const int config_btctler_le_roles\s*=\s*)\([^)]*\)", r"\1(LE_ADV | LE_SLAVE)"),
+    (r"(const int config_le_gatt_client_num\s*=\s*)[^;]+", r"\g<1>0"),
+    (r"(const int CONFIG_TEST_DUT_CODE\s*=\s*)1", r"\g<1>0"),
+    (r"(const int CONFIG_TEST_FCC_CODE\s*=\s*)1", r"\g<1>0"),
+    (r"(const int CONFIG_LMP_NAME_REQ_ENABLE\s*=\s*)1", r"\g<1>0"),
+    (r"(const int CONFIG_LMP_PASSKEY_ENABLE\s*=\s*)1", r"\g<1>0"),
+    (r"(const int CONFIG_LMP_MASTER_ESCO_ENABLE\s*=\s*)1", r"\g<1>0"),
+    (r"(const int CONFIG_BREDR_INQUIRY\s*=\s*)1", r"\g<1>0"),
+    (r"(const int config_btctler_dual_a2dp\s*=\s*)1", r"\g<1>0"),
+    (r"(const int config_btctler_le_master_multilink\s*=\s*)1", r"\g<1>0"),
+    (r"(const int config_multilink_support_esco_enalbe\s*=\s*)1", r"\g<1>0")]}
+# ble_no_pairing = true (with ble_trim): no pairing or encryption either (the security manager). Bluetooth MIDI needs
+# neither: an iPhone and a Mac connect, MIDI both ways (LOOM-8, 2026-10-25)
+BLE_CONFIG_NO_SM = {"apps/common/config/log_config/lib_btctrler_config.c": [
+    (r"(const int config_le_sm_support_enable\s*=\s*)1", r"\g<1>0"),
+    (r"(const uint64_t config_btctler_le_features\s*=\s*)\(LE_ENCRYPTION\)", r"\g<1>(0)")]}
+
+
+def ble_config(sdk, dst):
+    """the SDK's configuration sources into dst, as BLE_CONFIG cuts them (ble_trim); written only when changed"""
+    import re as _re
+    import shutil
+    cuts = {}
+    if BLE and CONF.get("ble_trim"):
+        for d in (BLE_CONFIG, BLE_CONFIG_NO_SM if CONF.get("ble_no_pairing") else {}):
+            for f, rs in d.items():
+                cuts.setdefault(f, []).extend(rs)
+    for f in BLE_SDK_SRC:
+        text = (sdk / f).read_text(errors="ignore")
+        for rx, rep in cuts.get(f, []):
+            text, n = _re.subn(rx, rep, text)
+            if not n:
+                raise SystemExit(f"build: {f} in the SDK has changed: no {rx!r}")
+        if not (dst / f).exists() or (dst / f).read_text(errors="ignore") != text:
+            (dst / f).parent.mkdir(parents=True, exist_ok=True)
+            (dst / f).write_text(text)
+
+
+def ble_trim(dst):
+    """OUT/ble/trim/LIB: the libraries with BLE_TRIM's functions replaced (cached by their stubs); {LIB: path}"""
+    import shutil
+    trim = OUT / "ble" / "trim"
+    pick = os.environ.get("FM1B_STUBS")           # (a bisection: only these members' stubs, e.g. "ll_scan,gatt_client")
+    items = {k: v for k, v in BLE_TRIM.items() if not pick or k[1].replace(".c.o", "") in pick.split(",")}
+    key = repr(sorted(items.items()))
+    libs = {lib: trim / lib for lib, _ in items}
+    if (trim / "key").exists() and (trim / "key").read_text() == key:
+        return libs
+    if trim.exists():
+        shutil.rmtree(trim)
+    trim.mkdir(parents=True)
+    for (lib, member), src in items.items():
+        if not (trim / lib).exists():
+            shutil.copy(dst / "lib" / lib, trim / lib)
+        w = trim / member.replace(".c.o", "")
+        w.mkdir()
+        (w / "stub.c").write_text(src + "\n")
+        tc("common/bin/llvm-ar", "x", trim / lib, member)         # (into ROOT, the tools' cwd: moved below)
+        shutil.move(ROOT / member, w / member)
+        tc("cc", "-mcpu=r3", "-mfprev1", "-Oz", "-flto", "-c", w / "stub.c", "-o", w / "stub.bc")
+        tc("common/bin/llvm-link", w / member, f"-override={(w / 'stub.bc').resolve().relative_to(ROOT)}",
+           "-o", w / "out.bc")
+        shutil.copy(w / "out.bc", w / member)
+        tc("common/bin/llvm-ar", "r", trim / lib, w / member)
+    (trim / "key").write_text(key)
+    return libs
+
+
 # WiFi: the SDK's no-SDRAM builds (demo_audio) link the _sfc variants: smaller buffers, code from flash (fm1-radio's)
 WIFI_LIBS = ["wl_wifi_sta_sfc.a", "wpasupplicant.a", "hsm.a"]
 RADIO_LIBS = ["crypto_toolbox_Osize.a", "lib_ccm_aes.a", "wl_rf_common.a"]   # (either radio's)
@@ -340,7 +458,7 @@ LWIP_INC = ["include_lib/net/device", "include_lib/net/device/eth", "include_lib
 WIFI_INC = ["include_lib/net/wifi", "include_lib/net/lwip_2_1_3/lwip/src/include",
             "include_lib/net/lwip_2_1_3/lwip/src/include/lwip", "include_lib/net/lwip_2_1_3/lwip/src/include/netif",
             "include_lib/net/lwip_2_1_3/lwip/port", "include_lib/net/lwip_2_1_3/lwip/port/arch", "include_lib/net/HSM"]
-BLE_CF = ["-integrated-as", "-mcpu=r3", "-mfprev1", "-fno-common", "-Oz", "-flto", "-fallow-pointer-null",
+BLE_CF = ["-integrated-as", f"-mcpu={CPU}", "-mfprev1", "-fno-common", "-Oz", "-flto", "-fallow-pointer-null",
           "-fprefer-gnu-section", "-femulated-tls", "-fms-extensions", "-w", "-DSUPPORT_MS_EXTENSIONS",
           "-DCONFIG_RELEASE_ENABLE", "-DCONFIG_CPU_WL82", "-DCONFIG_FREE_RTOS_ENABLE", "-DCONFIG_THREAD_ENABLE",
           "-D__GCC_PI32V2__", "-DCONFIG_NEW_ECC_ENABLE", "-DCONFIG_SFC_ENABLE", "-DCONFIG_NO_SDRAM_ENABLE",
@@ -359,14 +477,12 @@ def radio_units():
             shutil.copytree(sdk / d, dst / d, dirs_exist_ok=True,
                             ignore=lambda dd, names: [n for n in names if (Path(dd) / n).is_file()
                                                       and not n.endswith((".h", ".hpp"))])
-        for f in BLE_SDK_SRC:
-            (dst / f).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(sdk / f, dst / f)
         (dst / "lib").mkdir(exist_ok=True)
         for f in BLE_LIBS:
             shutil.copy(sdk / "cpu/wl82/liba" / f, dst / "lib" / f)
         shutil.copy(sdk / "include_lib/newlib/pi32v2-lib/libcompiler_rt.a", dst / "lib")
         (dst / ".copied").write_text("")
+    ble_config(sdk, dst)
     if WIFI and not (dst / ".copied_wifi").exists():
         for d in LWIP_DIRS:                       # lwIP's sources
             for c in (sdk / "lib/net/lwip_2_1_3" / d).glob("*.c"):
@@ -379,6 +495,10 @@ def radio_units():
     flags = [*inc(*(dst / d for d in BLE_INC + WIFI_INC * WIFI)), *inc(SRC / "ble" / "shim")]
     if WIFI:
         flags += ["-DSHIM_WIFI=1"]
+    if CONF.get("ble_stack_kb"):                  # the Bluetooth tasks' stacks, KB each (default 8)
+        flags.append(f"-DSHIM_STACK_WORDS={int(CONF['ble_stack_kb']) * 256}")
+    if CONF.get("ble_heap_kb") and not WIFI:      # its heap, KB (default 24, in RAM)
+        flags.append(f"-DSHIM_BLE_HEAP_KB={int(CONF['ble_heap_kb'])}u")
     o = OUT / "ble" / "o"
     o.mkdir(parents=True, exist_ok=True)
     units = [("cc", "-c", SRC / "ble" / "shim" / "ctx.S", "-o", o / "ctx.o")]
@@ -427,7 +547,11 @@ def radio_units():
                               "-o", o / name))
                 objs.append(o / name)
     linked = (BLE_LIBS if BLE else RADIO_LIBS) + WIFI_LIBS * WIFI
-    libs = ["--start-group", *[dst / "lib" / f for f in linked], dst / "lib" / "libcompiler_rt.a", "--end-group"]
+    if BLE and CONF.get("ble_trim") and CONF.get("ble_central"):
+        raise SystemExit("build: ble_trim cuts the central's scan, connecting and GATT client: not with ble_central")
+    trimmed = ble_trim(dst) if BLE and CONF.get("ble_trim") else {}
+    libs = ["--start-group", *[trimmed.get(f, dst / "lib" / f) for f in linked], dst / "lib" / "libcompiler_rt.a",
+            "--end-group"]
     return units, objs, libs
 
 
@@ -435,7 +559,21 @@ def radio_units():
 def build_app():
     flags = [*CFLAGS, *FPU, *inc(BSP / "chip", BSP / "boards" / BOARD, SRC / "device", SRC / "include", SRC / "lib", APP, GEN,
                                  *(APP / d for d in CONF.get("include", []) + CONF.get("device_include", [])))]
-    if BLE:
+    if BLE and OWN:                               # the own stack: its units in the unity build (device/bt_own.c)
+        flags += ["-DFM1B_BLE=1", "-DFM1B_BLE_OWN=1", *inc(SRC / "bt" / "ble", SRC / "bt" / "br")]
+        if CONF.get("ble_central"):
+            flags.append("-DFM1B_BLE_CENTRAL=1")
+        if CONF.get("bt_audio"):                   # Bluetooth audio out (A2DP source, bt/br)
+            flags.append("-DFM1B_BT_AUDIO=1")
+            if CONF.get("bt_log"):                 # its step-by-step lines on the radio's log (fm1_remote.py log)
+                flags.append("-DFM1B_BT_LOG=1")
+        if CONF.get("ble_pairing"):                # pairing and an encrypted link (LE legacy, Just Works; the bond kept)
+            flags += ["-DBLE_LL_ENC=1", "-DBLE_SMP_LEGACY=1"]
+        GEN.mkdir(parents=True, exist_ok=True)    # the radio's start-up program (fm1_ble_rf.h includes it)
+        tables = (BSP / "chip" / "ble_rf_tables_v15.h").read_bytes()   # (Apache-2.0: JieLi's rf_init, from V15)
+        if not (GEN / "ble_rf_tables.h").exists() or (GEN / "ble_rf_tables.h").read_bytes() != tables:
+            (GEN / "ble_rf_tables.h").write_bytes(tables)
+    elif BLE:
         flags += ["-DFM1B_BLE=1", *inc(SRC / "ble" / "shim")]
         if CONF.get("ble_central"):
             flags.append("-DFM1B_BLE_CENTRAL=1")
@@ -445,6 +583,8 @@ def build_app():
     for key, flag in (("usb_audio_in", "FM1B_UAC"), ("usb_audio_out", "FM1B_UAC_OUT")):
         if key in CONF and flag not in os.environ:
             flags.append(f"-D{flag}={int(bool(CONF[key]))}")
+    if CONF.get("usb_audio_first"):
+        flags.append("-DFELUCCA_UAC_AS_FIRST=1")
     for flag in ("FM1B_CDC", "FM1B_UAC", "FM1B_UAC_OUT", "FM1B_TRS"):
         v = os.environ.get(flag)    # unset: fm1.toml's, the app's (app.h) or the platform's default (device/unity.c)
         if v in ("0", "1"):
@@ -455,6 +595,8 @@ def build_app():
             flags.append(f'-D{macro}="{CONF[key]}"')
     if VERSION:
         flags.append(f'-DAPP_VERSION="{VERSION}"')
+    if CPU2:
+        flags += ["-DFM1_CPU1=1", f"-DFM1B_BUILD={build_id():#010x}u", f"-DFM1_CPU1_FALLBACK={int(bool(CONF.get('cpu2_fallback')))}"]
     o2 = [f if f != "-Os" else "-O2" for f in flags]
     ir = CONF.get("ir_pass")                      # the app's pass over the IR (see the top)
     ir_out = ["-S", "-emit-llvm", "-Xclang", "-disable-llvm-optzns"] if ir else []
@@ -463,6 +605,9 @@ def build_app():
              ("cc", "-c", BSP / "chip" / "fm1_isr.S", "-o", OUT / "fm1_isr.o"),
              ("cc", *flags, *ir_out, "-c", SRC / "device" / "unity.c", "-o", OUT / ("unity.ll" if ir else "unity.o"))]
     objs = [OUT / "crt0.o", OUT / "fm1_vec.o", OUT / "fm1_isr.o", OUT / "unity.o"]
+    if CPU2:                                      # the second core's entry and stacks
+        units.append(("cc", "-c", BSP / "chip" / "fm1_cpu1.S", "-o", OUT / "fm1_cpu1.o"))
+        objs.append(OUT / "fm1_cpu1.o")
     for a in CONF.get("asm", []):                 # the app's own assembly units
         o = OUT / ("asm_" + "_".join((APP / a).relative_to(APP).with_suffix("").parts) + ".o")
         units.append(("cc", "-c", APP / a, "-o", o))
@@ -477,7 +622,8 @@ def build_app():
             units.append(("cc", *o2, *o2_more, *inc(f.parent), *ir_out, "-c", f, "-o", o.with_suffix(".ll") if ir else o))
             objs.append(o)
             o2_units.append((f, o))
-    b_units, b_objs, b_libs = radio_units() if BLE or WIFI else ([], [], [])
+    jieli = (BLE and not OWN) or WIFI             # JieLi's libraries linked (the shim, LTO)
+    b_units, b_objs, b_libs = radio_units() if jieli else ([], [], [])
     tc_all(*units, *b_units)
     if ir:                                        # the pass, then each unit's code from its IR at its own level
         def ir_pass(src, dst, unit=None):
@@ -499,7 +645,7 @@ def build_app():
     # mono reference paths for the host tests that the firmware no longer calls. The BT libraries are LTO
     # bitcode: the linker needs the toolchain's LLVM plugin
     lto = ["--plugin", "/opt/jieli/pi32v2/bin/LLVMgold.so" if use_docker() else str(toolchain() / "pi32v2/bin/LLVMgold.so"),
-           "--plugin-opt=mcpu=r3", "--plugin-opt=-pi32v2-large-program=true"] if BLE or WIFI else []
+           f"--plugin-opt=mcpu={CPU}", "--plugin-opt=-pi32v2-large-program=true"] if jieli else []
     ld = SRC / "device" / ("app_wifi.ld" if WIFI else "app.ld")
     if APP_SLOT != 0x8DFBC:                       # another board's app slot (the SMK-37): the same script, its XIP length
         txt = ld.read_text()
@@ -515,8 +661,8 @@ def build_app():
                                ("common/bin/objcopy", "-O", "binary", "-j", ".data", elf, OUT / "data.bin"),
                                ("common/bin/objcopy", "-O", "binary", "-j", ".ram_text", elf, OUT / "ramtext.bin"),
                                ("common/bin/objdump", "-t", elf),
-                               ("common/bin/objdump", "-d", elf),
-                               ("common/bin/objdump", "-d", "-j", ".ram_text", elf))
+                               ("common/bin/objdump", "-d", f"-mcpu={CPU}", elf),
+                               ("common/bin/objdump", "-d", f"-mcpu={CPU}", "-j", ".ram_text", elf))
     (OUT / (NAME + ".dis")).write_text(dis)
 
     def symv(name):
@@ -587,7 +733,8 @@ def check(img, syms, dis, rt):
     in_c1 = (lambda ln: (mm2 := LINE.match(ln)) is not None and c1[0] <= int(mm2.group(1), 16) < c1[1]) \
         if len(c1) == 2 else (lambda ln: False)   # (the second core's loop: it may call into the flash, see the top)
     rt_calls = [ln for ln in rt.splitlines() if re.search(r"\bcall\b", ln) and not in_c1(ln)]
-    if rt_calls and (BLE or WIFI):  # JieLi's .volatile_ram_code calls out; it runs with the flash on
+    jieli = (BLE and not OWN) or WIFI
+    if rt_calls and jieli:          # JieLi's .volatile_ram_code calls out; it runs with the flash on
         notes.append(f"the radio: .ram_text contains calls (JieLi's .volatile_ram_code): {rt_calls[:3]}")
     elif rt_calls:                  # RAM code runs with the flash off: no calls into XIP
         errors.append(f".ram_text contains calls: {rt_calls[:3]}")
@@ -614,6 +761,15 @@ def check(img, syms, dis, rt):
     else:
         notes.append("no 64-bit multiply inlined beside a load")
     bt = [n for n in BT_SYMS if re.search(r"\s" + n + r"$", syms, re.M)]
+    if BLE and OWN:                 # the own stack: nothing of JieLi's, and the radio's ramp in RAM (docs/bt/BLE-STACK.md §8.1)
+        bt = [n for n in bt if n != "ble_midi_send_many"]   # (radio.c's name, which bt_own.c gives too)
+        if bt:
+            errors.append(f"ble_stack = own links JieLi's Bluetooth code: {bt}")
+        rf = re.search(r"^([0-9a-f]+) .*\sfm1_rf_burst_run$", syms, re.M)
+        if not rf or not 0x01C00000 <= int(rf.group(1), 16) < 0x01C08000:
+            errors.append("fm1_rf_burst_run is not in .ram_text (the radio's crystal ramp must run from RAM)")
+        else:
+            notes.append("own Bluetooth stack: nothing of JieLi's linked, the radio's ramp in RAM")
     if CONF.get("ble") and not BLE:
         if bt:
             errors.append(f"--no-ble build links Bluetooth code: {bt}")
@@ -623,7 +779,7 @@ def check(img, syms, dis, rt):
         errors.append(f"image {len(img)} B exceeds the app slot")
     # the FPU is single precision; a soft-double routine in the image means a double crept in
     soft = sorted(set(re.findall(r"\s(__(?:add|sub|mul|div|neg|cmp|eq|ne|lt|le|gt|ge|un|extendsf|truncdf|fixdf|fixunsdf|floatsidf|floatunsidf|floatdidf)\w*df\w*)$", syms, re.M)))
-    if soft and (BLE or WIFI):
+    if soft and jieli:
         notes.append(f"soft-double routines linked (JieLi's radio setup): {soft[:6]}")
     elif soft:
         errors.append(f"soft-double routines linked: {soft[:6]} (a double in the code)")
@@ -722,11 +878,22 @@ def o2_objects(cc, base_flags, out):
     return [str(o) for _, o in jobs]
 
 
+def build_id():
+    """this build's sources (the app's, fm1-base's, felucca-bsp's chip/) and version, hashed: the second core's bar
+    (fm1_cpu1_bar_build) is lifted for a new build"""
+    h = hashlib.sha1((VERSION or "").encode())
+    for d in (APP, SRC / "device", SRC / "include", BSP / "chip"):
+        for f in sorted(d.rglob("*")):
+            if f.suffix in (".c", ".h", ".S", ".toml", ".ld") and "build" not in f.relative_to(d).parts:
+                h.update(str(f.relative_to(d)).encode())
+                h.update(f.read_bytes())
+    return int.from_bytes(h.digest()[:4], "little")
+
+
 def opt_flags():
     """the optional parts an fm1.toml turns on that need no SDK: the same on the device, the host and the web"""
-    return [f"-D{flag}=1" for key, flag in (("mirror", "FM1B_MIRROR"), ("backup", "FM1B_BACKUP"))
-            if CONF.get(key) or os.environ.get(flag) == "1"] + BOARD_DEFS   # (FM1B_MIRROR=1: a build with it, fm1.toml
-                                                                            # as it is; the board's, SMK-37 only)
+    return [f"-D{flag}=1" for key, flag in (("mirror", "FM1B_MIRROR"), ("backup", "FM1B_BACKUP"), ("cpu2", "FM1B_CPU2"), ("usb_host", "FM1B_USB_HOST"))
+            if (CONF.get(key) and os.environ.get(flag) != "0") or os.environ.get(flag) == "1"] + BOARD_DEFS   # (FM1B_MIRROR=1: a build with it, fm1.toml as it is; FM1B_BACKUP=0: without; the board's, SMK-37 only)
 
 
 def build_host():
@@ -796,8 +963,111 @@ def build_web():
     return 0
 
 
+def git(*args, cwd=None):
+    r = subprocess.run(["git", *args], cwd=cwd or APP, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def c_str(s):
+    """a C string literal (split by line, so a long text stays readable in the header)"""
+    def esc(t):
+        return t.replace("\\", "\\\\").replace('"', '\\"').replace("\t", "\\t").replace("?", "\\?")
+    lines = s.split("\n")
+    return " \\\n".join('"' + esc(ln) + ("\\n" if i < len(lines) - 1 else "") + '"' for i, ln in enumerate(lines))
+
+
+def build_rfm1():
+    """the host simulator in WebAssembly with host/rfm1.c's exports, packed as an .rfm1 (tools/rfm1_pack.py): the
+    manifest from fm1.toml, app.h and git; the credits and licence texts of the app, fm1-base, felucca-bsp and
+    Emscripten's runtime"""
+    out = OUT / "rfm1"
+    out.mkdir(parents=True, exist_ok=True)
+    repo = Path(git("rev-parse", "--show-toplevel") or APP.parent)
+    head = git("rev-parse", "HEAD")
+    if git("status", "--porcelain", "--untracked-files=no"):
+        print("rfm1: the app's repository has changes not committed: source_url names HEAD, which is not what was built")
+    app_name = next((m[1] for h in sorted(APP.glob("*.h"))
+                     for m in [re.search(r'^#define APP_NAME "([^"]*)"', h.read_text(errors="ignore"), re.M)] if m),
+                    CONF.get("name", NAME))
+    rid = re.sub(r"[^a-z0-9_]", "_", NAME)[:31]
+    version = VERSION or "dev+" + (head[:7] or "local")
+    url = CONF.get("repo") or re.sub(r"^git@github\.com:", "https://github.com/", git("remote", "get-url", "origin"))
+    url = re.sub(r"\.git$", "", url)
+    source_url = f"{url}@{head}" if head else url
+    base_head = git("rev-parse", "HEAD", cwd=SRC)
+    emver = subprocess.run(["emcc", "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+    emver = re.search(r"\) ([0-9][^ ]*)", emver)[1] if re.search(r"\) ([0-9][^ ]*)", emver) else emver
+    authors = CONF.get("authors") or [a for a in [git("log", "--reverse", "--format=%an", cwd=repo).split("\n")[0]] if a]
+    mem = int(CONF.get("rfm1_memory_mib", 8))
+    if not 1 <= mem <= 32:
+        raise SystemExit(f"fm1.toml rfm1_memory_mib {mem}: 1 .. 32")
+    # credits: the app's (CREDITS.md, or fm1.toml credits), then fm1-base's
+    credits = []
+    if (repo / "CREDITS.md").exists():
+        credits.append((repo / "CREDITS.md").read_text().strip())
+    elif CONF.get("credits"):
+        credits.append(f"{app_name}: {CONF['credits']}")
+    credits.append((SRC / "CREDITS.md").read_text().strip())
+    credits = "\n\n".join(credits) + "\n"
+    (out / "credits.txt").write_text(credits)
+    licence = CONF.get("licence", "MPL-2.0")
+    (GEN / "rfm1_info.h").write_text(
+        "/* tools/build.py --rfm1: the descriptor's strings (the manifest's) */\n"
+        f"#define RFM1_ID {c_str(rid)}\n#define RFM1_NAME {c_str(app_name)}\n#define RFM1_VERSION {c_str(version)}\n"
+        f"#define RFM1_SOURCE_URL {c_str(source_url)}\n#define RFM1_LICENSE {c_str(licence)}\n"
+        f"#define RFM1_CREDITS \\\n{c_str(credits)}\n")
+    # the licence texts: the app's, fm1-base's, felucca-bsp's, Emscripten's (its runtime and musl are compiled in)
+    lic = []
+    for f in [repo / "LICENSE", repo / "COPYING", *sorted((repo / "LICENSES").glob("*")), repo / "LICENSING.md"]:
+        if f.is_file():
+            lic.append((f"{app_name}: {f.relative_to(repo)}", f))
+    lic += [("fm1-base: LICENSE (MPL-2.0)", SRC / "LICENSE"), ("felucca-bsp: LICENSE", BSP / "LICENSE")]
+    em_root = subprocess.run(["em-config", "EMSCRIPTEN_ROOT"], capture_output=True, text=True).stdout.strip()
+    em_lic = next((d / "LICENSE" for d in (Path(em_root), Path(em_root).parent) if em_root and (d / "LICENSE").exists()), None)
+    if em_lic:
+        lic.append(("Emscripten (its runtime, compiled in): LICENSE", em_lic))
+        musl = Path(em_root) / "system" / "lib" / "libc" / "musl" / "COPYRIGHT"
+        if musl.exists():
+            lic.append(("musl libc (in Emscripten's runtime): COPYRIGHT", musl))
+    else:
+        print("rfm1: Emscripten's LICENSE not found (em-config EMSCRIPTEN_ROOT): the file goes without it")
+    lic = [(n, f) for n, f in lic if f.is_file()]
+    feats = ["-mcpu=mvp", "-msign-ext", "-mnontrapping-fptoint", "-mbulk-memory", "-mmutable-globals"]   # wasm3 0.5.0's
+    inc = [f"-I{d}" for d in (SRC / "host", SRC / "device", SRC / "include", SRC / "lib", APP, GEN, *(APP / d for d in CONF.get("include", [])))]
+    defs = ["-DPLAT_HOST", "-DPLAT_WEB", "-DPLAT_RFM1", *opt_flags(), *["-DFM1B_BLE=1"] * BLE,
+            *["-DFM1B_BLE_CENTRAL=1"] * (BLE and bool(CONF.get("ble_central"))), *["-DFM1B_WIFI=1"] * WIFI,
+            *(f'-DAPP_VERSION="{VERSION}"',) * bool(VERSION)]
+    o2_objs = o2_objects("emcc", [*feats, "-O2", "-ffp-contract=off", "-std=gnu99", "-w", *defs, *inc], out / "o2")
+    wasm = out / "app.wasm"
+    cmd = ["emcc", *feats, "-O2", "-ffp-contract=off", "-std=gnu99", "-Wall", "-Wno-unused-function",
+           "-Wno-unused-parameter", "-Wno-unused-variable", *defs, *inc,
+           "--no-entry", "-sSTANDALONE_WASM", "-sFILESYSTEM=0", "-sSTACK_SIZE=1048576",
+           f"-sINITIAL_MEMORY={mem << 20}", "-sALLOW_MEMORY_GROWTH=0",
+           "-o", str(wasm), str(SRC / "host" / "rfm1.c"), *o2_objs]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    sys.stderr.write(r.stderr)
+    if r.returncode:
+        raise SystemExit("build: the .rfm1 did not compile (emcc: Emscripten; rfm1_memory_mib if the data does not fit)")
+    manifest = {"rfm1": 1, "abi": 6, "id": rid, "name": app_name, "version": version, "license": licence,
+                "source_url": source_url, "authors": authors,
+                "glue_url": f"https://github.com/charlesvestal/fm1-base/tree/{base_head}" if base_head else None,
+                "built_by": f"fm1-base {base_head[:7]} tools/build.py --rfm1, emcc {emver}", "memory_mib": mem}
+    manifest = {k: v for k, v in manifest.items() if v}
+    import json
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
+    dst = out / f"{rid}-{version}.rfm1"
+    r = subprocess.run([sys.executable, str(SRC / "tools" / "rfm1_pack.py"), str(wasm), str(dst),
+                        "--manifest", str(out / "manifest.json"), "--credits", str(out / "credits.txt"),
+                        *[a for n, f in lic for a in ("--license", f"{n}={f}")]], capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    if r.returncode:
+        raise SystemExit("build: the .rfm1 is not to the format (tools/rfm1_pack.py)")
+    return 0
+
+
 def main():
-    global PRODUCT, VERSION, APP, OUT, GEN, LDR, ROOT, CONF, NAME, BLE, WIFI, STEM, BOARD, BOARD_DEFS, APP_SLOT
+    global PRODUCT, VERSION, APP, OUT, GEN, LDR, ROOT, CONF, NAME, BLE, OWN, WIFI, CPU2, STEM, BOARD, BOARD_DEFS, APP_SLOT
     ap = argparse.ArgumentParser()
     ap.add_argument("app", type=Path, help="the app's directory (with fm1.toml)")
     ap.add_argument("--release", metavar="X.Y[.Z]", help="release build: identity id_prefix + XXYYZZ, version string X.Y[.Z]")
@@ -807,12 +1077,17 @@ def main():
     ap.add_argument("--board", choices=("fm1", "smk37"), help="the board: fm1 (default) or smk37 (default: $BOARD)")
     ap.add_argument("--model", choices=sorted(MODELS), help="smk37: pro (default), elite or mke (default: $MODEL)")
     ap.add_argument("--web", action="store_true", help="build the browser emulator instead of the firmware")
+    ap.add_argument("--rfm1", action="store_true", help="build an .rfm1 (host apps) instead of the firmware")
     a = ap.parse_args()
     APP = a.app.resolve()
     CONF = read_conf(APP / "fm1.toml")
     NAME = CONF.get("name", APP.name).lower()
     BLE = bool(CONF.get("ble")) and not a.no_ble
+    OWN = BLE and CONF.get("ble_stack", "jieli") == "own"
+    if CONF.get("ble_stack", "jieli") not in ("jieli", "own"):
+        raise SystemExit(f"fm1.toml ble_stack {CONF['ble_stack']!r}: \"jieli\" or \"own\"")
     WIFI = bool(CONF.get("wifi"))
+    CPU2 = (bool(CONF.get("cpu2")) and os.environ.get("FM1B_CPU2") != "0") or os.environ.get("FM1B_CPU2") == "1"
     if BLE and WIFI:
         raise SystemExit("fm1.toml: ble and wifi together are not supported yet (one radio a build; --no-ble for WiFi)")
     STEM = NAME + ("-usb" if CONF.get("ble") and not BLE else "")
@@ -860,9 +1135,9 @@ def main():
             PRODUCT = prefix + "%02d%02d" % (int(m[1]), int(m[2]))   # release drops the patch digits)
         VERSION = a.release.upper()
         name = f"{STEM}-{a.release}.fwsc"
-    if a.host or a.web:
+    if a.host or a.web or a.rfm1:
         generate()
-        return build_host() if a.host else build_web()
+        return build_host() if a.host else build_web() if a.web else build_rfm1()
     fm1pkg_make.SDK = a.sdk
     for rel, sha in SDK_SHA256.items():          # fail early without the SDK
         if hashlib.sha256(fm1pkg_make.sdk_file(rel)).hexdigest() != sha:
@@ -890,7 +1165,8 @@ def main():
     parts = [("Bluetooth MIDI", BLE), ("Bluetooth MIDI devices", BLE and bool(CONF.get("ble_central"))), ("WiFi", WIFI),
              ("USB audio in", on("usb_audio_in", "FM1B_UAC", True)),
              ("USB audio out", on("usb_audio_out", "FM1B_UAC_OUT", True) and on("usb_audio_in", "FM1B_UAC", True)),
-             ("screen mirroring", bool(CONF.get("mirror")) or os.environ.get("FM1B_MIRROR") == "1"), ("backup and restore", bool(CONF.get("backup"))),
+             ("screen mirroring", bool(CONF.get("mirror")) or os.environ.get("FM1B_MIRROR") == "1"), ("backup and restore", bool(CONF.get("backup")) and os.environ.get("FM1B_BACKUP") != "0"),
+             ("the second core", CPU2), ("USB MIDI host", on("usb_host", "FM1B_USB_HOST", False)),
              ("velocity and pressure", any(re.search(r"^#define APP_TOUCH\b", f.read_text(errors="ignore"), re.M)
                                             for f in APP.glob("*.h")))]
     print("parts    " + ", ".join(n for n, x in parts if x) + "  (not built in: " +

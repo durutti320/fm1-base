@@ -28,6 +28,14 @@ run trs sh -c "$CC -O2 -w -Ibsp/chip -Ibsp/boards/fm1 -Idevice -o $OUT/trs_test 
 run storage sh -c "$CC -O2 -w -o $OUT/storage_test tests/storage_test.c && $OUT/storage_test"
 run fastmath sh -c "$CC -O2 -w -o $OUT/fastmath_test tests/fastmath_test.c -lm && $OUT/fastmath_test"
 run installer "$PY" tests/install_test.py
+# the web installer's m-bootloader step (web/fm1ota.js installBoot) against a simulated FM-1, and finding the FM-1 by
+# its port (unusual names, the loader under a new name, M-VAVE's Open firmware, resume's check, package checksums)
+if command -v node >/dev/null 2>&1; then
+    run installer-boot node tests/installer_boot_test.mjs web/m-bootloader/fm1-uboot-1.2.fwsc
+    run installer-ports node tests/installer_ports_test.mjs web/m-bootloader/fm1-uboot-1.2.fwsc
+else
+    echo "  skip installer-boot (no node)"
+fi
 # backup and restore over USB (device/backup.c) on storage.c over a simulated flash, for a test app: the stream's
 # frames, a restore refused or failed at every step changing nothing, a power cut at each write: the old set or the
 # new, whole. Then tools/fm1_backup.py against a simulated FM-1 on that image, and the web page (web/backup) against
@@ -43,7 +51,7 @@ else
 fi
 PKG=template/build/template.fwsc
 if [ -f "$PKG" ]; then
-    run ota-entry sh -c "$CC -w -o $OUT/ota_test tests/ota_test.c && $OUT/ota_test $PKG"
+    run ota-entry sh -c "$CC -w -o $OUT/ota_test tests/ota_test.c && $OUT/ota_test $PKG web/m-bootloader/fm1-uboot-1.2.fwsc"
     run update-loader sh -c "head -c 60000 template/build/template.bin > $OUT/old_app.bin && \
         $PY tools/fm1pkg_make.py $OUT/old_app.bin template/build/loader/ota.bin $OUT/old.fwsc >/dev/null && \
         $CC -w -o $OUT/ldr_test tests/ldr_test.c && $OUT/ldr_test $OUT/old.fwsc $PKG"
@@ -63,5 +71,16 @@ else
 fi
 run mirror-png "$PY" tools/fm1_mirror.py $OUT/mirror.png --from $OUT/mirror/stream.syx
 run template template/build/host/template_host template/tests/basic.txt template/build/host
+# the own Bluetooth stack (bt/, Optimist's: ble_stack = "own"): its link layer, host, pairing, BLE-MIDI, central, the
+# radio driver against a fake engine, FM-1 to FM-1, and BR/EDR (A2DP) pieces; UBSan, and ASan where its runtime runs
+if sh tests/bt/run.sh; then :; else FAIL=1; fi
+# the template as an .rfm1 (tools/build.py --rfm1: the host simulator in WebAssembly for host apps), driven as a host
+# app drives it: the descriptor, the screen, a chord, the reader over SysEx, the flash image booted from again
+if command -v emcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    rm -f template/build/rfm1/*.rfm1
+    run rfm1 sh -c "$PY tools/build.py template --rfm1 && node tests/rfm1_test.mjs template/build/rfm1/*.rfm1"
+else
+    echo "  skip rfm1 (no emcc or node)"
+fi
 [ $FAIL -eq 0 ] && echo "all tests passed" || echo "TESTS FAILED"
 exit $FAIL

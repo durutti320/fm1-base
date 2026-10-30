@@ -5,9 +5,9 @@
  * WiFi build) or radio_none.c. */
 static void ble_start(void) {}
 static void ble_poll(void) {}
-static int ble_midi_in(uint32_t *pkt) { (void)pkt; return 0; }
-static void ble_midi_tap(uint32_t pkt) { (void)pkt; }
-static uint32_t ble_midi_out_room(void) { return 0; }
+static int ble_midi_in(uint32_t *pkt, uint32_t *from) { (void)pkt, (void)from; return 0; }
+static void ble_midi_tap(uint32_t pkt, uint32_t to) { (void)pkt, (void)to; }
+static uint32_t ble_midi_out_room(uint32_t to) { (void)to; return 0; }
 
 /* ---- plat.h */
 int plat_ble_state(void) { return BLE_OFF; }
@@ -19,4 +19,5 @@ int plat_ble_found(int i, char *name, int *rssi) { (void)i, (void)name, (void)rs
 int plat_ble_connect(int i) { (void)i; return -1; }
 void plat_ble_disconnect(void) {}
 int plat_ble_device(void) { return BLE_DEV_OFF; }
+int plat_ble_passkey(void) { return -1; }
 void plat_ble_enable(int on) { (void)on; }

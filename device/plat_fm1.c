@@ -42,6 +42,28 @@ static volatile uint32_t master_pos = 2048;   /* MASTER's position, 0..4096 (mai
                                                * or the mirror's when they set it) */
 uint32_t plat_master(void) { return master_pos; }
 
+#if !BOARD_SMK37                                  /* (the SMK-37 has no battery reading: plat_smk37.c) */
+/* the battery: ADC ch3 (its divider), a slow average by the main loop. The stock firmware's thresholds, as X0X, melodee
+ * and dxsloop use them, give 0-3 bars; there is no charger line, so a USB host means power */
+static int32_t batt_raw;
+static int8_t batt_bars = -1;
+int plat_battery(void)                           /* (a level moves once the reading is 4 past its threshold) */
+{
+    static const int16_t AT[3] = {531, 561, 591};
+    if (usb.config && !usb.suspended)
+        return 4;
+    if (!batt_raw)
+        return -1;
+    if (batt_bars < 0)
+        batt_bars = (int8_t)((batt_raw >= AT[0]) + (batt_raw >= AT[1]) + (batt_raw >= AT[2]));
+    while (batt_bars < 3 && batt_raw >= AT[batt_bars] + 4)
+        batt_bars++;
+    while (batt_bars > 0 && batt_raw < AT[batt_bars - 1] - 4)
+        batt_bars--;
+    return batt_bars;
+}
+#endif
+
 #if BOARD_SMK37
 #include "plat_smk37.c"                   /* the SMK-37: its lights, no key sensing, its extras and windows */
 #else
@@ -95,6 +117,19 @@ void plat_lights(uint32_t buttons, uint32_t keys, uint32_t dim_buttons, uint32_t
         mirror_leds((lit & ~play) | (buttons & (play | LED_PLAY_GREEN) ? play : 0u) | (buttons & play ? 1u << 15 : 0u),
                     keys);
     }
+}
+void plat_lights_mid(uint32_t buttons, uint32_t keys)   /* felucca-bsp's steady mid level (fm1_led_mid) */
+{
+    uint8_t ml[FM1_NCOL] = {0};
+    uint32_t i, c;
+    for (i = 0; i < NB + NKEYS; i++) {
+        uint32_t id = i < NB ? panel.btn[i] : 14u + (i - NB);
+        uint8_t q = led_pos[id];
+        if (q != 0xFF && (i < NB ? (buttons >> i) & 1u : (keys >> (i - NB)) & 1u))
+            ml[q >> 3] |= (uint8_t)(1u << (q & 7u));
+    }
+    for (c = 0; c < FM1_NCOL; c++)
+        fm1_led_mid[c] = (uint8_t)(ml[c] & ~fm1_led[c]);
 }
 #endif
 static uint8_t glow_on = 1, play_red;
@@ -193,7 +228,7 @@ void plat_yield(void)
 
 /* MIDI: the rings carry 4-byte USB-MIDI event packets, byte 0 = cable / CIN. USB and the TRS jack share midi_in_q
  * (both from TIMER5); the jack's packets carry cable 1 (midi_uart.c), which the single-jack USB descriptor never
- * does. Bluetooth has its own queue (radio.c, main loop). */
+ * does. Bluetooth has its own queue (radio.c, main loop), and its out rings, one a link. */
 /* each port's messages, in and out (plat_midi_count): for the app's MIDI lights and counters */
 static uint32_t midi_n[NPORTS][2], midi_t[NPORTS][2];
 static void midi_counted(int port, int out, uint32_t pkt)
@@ -213,11 +248,13 @@ uint32_t plat_midi_out_room(uint32_t to)
     uint32_t room = 0xFFFFFFFFu, r;
     if ((to & TO_USB) && (r = midi_out_room()) && r < room)
         room = r;
-    if ((to & TO_BLE) && (r = ble_midi_out_room()) && r < room)
+    if ((to & TO_BLE) && (r = ble_midi_out_room(to)) && r < room)
         room = r;
     return room == 0xFFFFFFFFu ? 0u : room;
 }
 uint32_t plat_midi_out_link(void) { return midi_out_link(); }
+static uint32_t midi_in_from;                     /* plat_midi_in_from: the last one's link, as an out */
+uint32_t plat_midi_in_from(void) { return midi_in_from; }
 int plat_midi_in(uint32_t *pkt, int *port)
 {
     int from;
@@ -226,9 +263,10 @@ int plat_midi_in(uint32_t *pkt, int *port)
         RING_PUBLISH();
         mi_r++;
         from = (p >> 4 & 0xFu) == 1u ? PORT_TRS : PORT_USB;
+        midi_in_from = from == PORT_USB ? TO_USB : 0u;
         *pkt = p & ~0xF0u;
     }
-    else if (ble_midi_in(pkt))
+    else if (ble_midi_in(pkt, &midi_in_from))
         from = PORT_BLE;
     else
         return 0;
@@ -247,13 +285,30 @@ void plat_midi_send(uint32_t pkt, uint32_t to)    /* the main loop's and the tic
         midi_counted(PORT_USB, 1, pkt);
     }
     if (to & TO_BLE) {
-        ble_midi_tap(pkt);
+        ble_midi_tap(pkt, to);
         midi_counted(PORT_BLE, 1, pkt);
     }
     if (!in_tick)
         plat_unlock(f);
 }
 void plat_midi_out(uint32_t pkt) { plat_midi_send(pkt, TO_USB); }
+
+#if FELUCCA_USB_HOST                              /* (felucca-bsp's UH_MSG_* are USBH_MSG_*, in order) */
+void plat_usb_host(int on) { usb_host_switch((uint32_t)(on != 0)); }
+int plat_usb_host_state(void) { return !usb_host_active() ? USBH_OFF : usb_host_connected() ? USBH_CONNECTED : USBH_LOOKING; }
+int plat_usb_host_msg(void) { return (int)usb_host_message(); }
+#else
+void plat_usb_host(int on) { (void)on; }
+int plat_usb_host_state(void) { return USBH_OFF; }
+int plat_usb_host_msg(void) { return USBH_MSG_NONE; }
+#endif
+int plat_usb_lost(void)
+{
+    if (!midi_usb_lost)
+        return 0;
+    midi_usb_lost = 0;
+    return 1;
+}
 
 #if !BOARD_SMK37                                  /* (the SMK: plat_smk37.c, none) */
 /* the keys' velocity and pressure (APP_KEY_SENSE): felucca-bsp's analog rows, as fm1-ctl and fm1-monk read them (the
@@ -285,6 +340,11 @@ uint32_t plat_analog_mask(void)
 
 #endif
 
+#if FM1B_WIFI || FM1B_BLE
+const uint8_t *plat_chip_uid(void) { return flash_ok ? flash_uid : 0; }
+#else
+const uint8_t *plat_chip_uid(void) { return 0; }
+#endif
 int plat_store_load(uint32_t obj, void *dst, uint32_t max) { return flash_ok ? st_load(obj, dst, max) : -1; }
 int plat_store_head(uint32_t obj, void *dst, uint32_t n) { return flash_ok ? st_load_head(obj, dst, n) : -1; }
 int plat_store_size(uint32_t obj) { return flash_ok ? st_size(obj) : -1; }
@@ -293,3 +353,5 @@ int plat_store_save(uint32_t obj, const void *src, uint32_t len) { return flash_
 static volatile uint32_t audio_cpu_pct, audio_xruns;
 uint32_t plat_cpu_pct(void) { return audio_cpu_pct; }
 uint32_t plat_xruns(void) { return audio_xruns; }
+_Static_assert(PLAT_TICKS_PER_US == FM1_TICKS_PER_US, "plat_ticks24 is TIMER4's count");
+uint32_t plat_ticks24(void) { return fm1_ticks(); }

@@ -38,11 +38,16 @@ uint32_t plat_buttons(void);           /* held: bit B_* */
 uint32_t plat_keys(void);              /* held: bit k = key k (0 = F3) */
 int32_t plat_enc(int role);            /* detents since the last call, + = clockwise; EN_* */
 uint32_t plat_master(void);            /* MASTER pot's position, 0..4096 (the render gets it as a gain: APP_GAIN) */
+int plat_battery(void);                /* the battery: 0 (empty) .. 3 (full), 4 a USB host powers the FM-1, -1 not read
+                                        * yet (the keys' readings own the converter: APP_KEY_SENSE) */
 
 /* lights: bright buttons and keys, and dim ones (a short pulse each scan frame; a bright bit wins); glow 0 the dim
  * ones off, 1 low, 2 high. Bit NB in buttons / dim_buttons is PLAY's second, green LED */
 void plat_lights(uint32_t buttons, uint32_t keys, uint32_t dim_buttons, uint32_t dim_keys, int glow);
 #define LED_PLAY_GREEN (1u << NB)
+/* a third level, between the glow and lit (~12 % of lit; ~8 % with glow 1): these buttons and keys, unless lit, until
+ * the next call (0, 0: none). Call it after plat_lights each time the lights change */
+void plat_lights_mid(uint32_t buttons, uint32_t keys);
 /* the same, simpler: the lit buttons and keys, the unlit buttons glowing if plat_glow(1); PLAY lights green, red
  * while plat_play_red(1) */
 void plat_leds(uint32_t buttons, uint32_t keys);
@@ -78,18 +83,40 @@ int32_t plat_k1_enc(void);             /* K1's detents since the last call, + = 
 #endif
 
 /* MIDI: 4-byte USB-MIDI event packets (byte 0 = cable / CIN, then status, data 1, data 2). In from USB, the TRS jack
- * (in only: the FM-1 has no MIDI out jack) and Bluetooth (FM1B_BLE); out to USB and Bluetooth. */
+ * (in only: the FM-1 has no MIDI out jack) and Bluetooth (FM1B_BLE); out to USB and Bluetooth. Bluetooth has two
+ * links with FM1B_BLE_CENTRAL (below), the computer's and the device's: both come in on PORT_BLE, TO_BLE goes to
+ * both, TO_BLE_HOST or TO_BLE_DEV to one. MIDI thru with nothing echoed back where it came from: after plat_midi_in,
+ * plat_midi_send(pkt, (TO_USB | TO_BLE) & ~plat_midi_in_from()) */
 enum { PORT_USB, PORT_BLE, PORT_TRS, NPORTS };
 #define TO_USB (1u << PORT_USB)
-#define TO_BLE (1u << PORT_BLE)
+#define TO_BLE_HOST (1u << PORT_BLE)   /* the computer (a phone, a tablet) connected to the FM-1 */
+#define TO_BLE_DEV (1u << 3)           /* the Bluetooth MIDI device the FM-1 connected to (FM1B_BLE_CENTRAL) */
+#define TO_BLE (TO_BLE_HOST | TO_BLE_DEV)
 int plat_midi_in(uint32_t *pkt, int *port);   /* 1 = got one, from port PORT_* (port may be 0) */
-void plat_midi_send(uint32_t pkt, uint32_t to);   /* to: TO_USB | TO_BLE; main loop, the render or the tick */
+uint32_t plat_midi_in_from(void);      /* where the last one came from, as an out: TO_USB, TO_BLE_HOST or TO_BLE_DEV
+                                        * (0: the TRS jack, which has no out); called where plat_midi_in is */
+void plat_midi_send(uint32_t pkt, uint32_t to);   /* to: TO_USB | TO_BLE, or one link; main loop, the render or the
+                                                   * tick */
 void plat_midi_out(uint32_t pkt);      /* plat_midi_send(pkt, TO_USB) */
-uint32_t plat_midi_out_room(uint32_t to);   /* the free slots in the out queues of to (TO_USB, TO_BLE): the fewest
-                                        * among the ports someone listens on; 0 when nobody does. A sequencer keeps
-                                        * room for the note-offs it owes before it sends a note-on */
+uint32_t plat_midi_out_room(uint32_t to);   /* the free slots in the out queues of to (TO_USB, TO_BLE, a link: each
+                                        * has its own): the fewest among the ones someone listens on; 0 when nobody
+                                        * does. A sequencer keeps room for the note-offs it owes before it sends a
+                                        * note-on */
 uint32_t plat_midi_out_link(void);     /* a number that changes at each new USB connection (a host to tell its
                                         * sounds again: programs, volumes) */
+/* USB MIDI host (fm1.toml usb_host = true: FM1B_USB_HOST 1; felucca-bsp docs/USB_HOST.md): the USB port plays host to
+ * a USB-MIDI controller or synth, directly or behind one powered hub; the FM-1 gives the port no power (a powered hub
+ * or adapter). It comes in on PORT_USB and TO_USB goes to it; no computer meanwhile (no USB audio, backup, mirror).
+ * Boot is always a device. plat_usb_host (main loop) asks; connecting blocks the main loop a moment (seconds behind a
+ * hub), the sound plays on. plat_usb_host_msg: the latest change, once (not a queue). plat_usb_lost: 1 once after a
+ * USB session ended (a device lost, the mode changed): release what its notes hold. Without FM1B_USB_HOST all stay
+ * USBH_OFF / 0. */
+enum { USBH_OFF, USBH_LOOKING, USBH_CONNECTED };
+enum { USBH_MSG_NONE, USBH_MSG_ON, USBH_MSG_OFF, USBH_MSG_MIDI, USBH_MSG_NOMIDI, USBH_MSG_LOW, USBH_MSG_LOST };
+void plat_usb_host(int on);
+int plat_usb_host_state(void);
+int plat_usb_host_msg(void);
+int plat_usb_lost(void);
 uint32_t plat_midi_count(int port, int out);   /* messages through port PORT_* since the start (out: sent), real-time (clock...) left out */
 uint32_t plat_midi_ago(int port, int out);     /* ms since the last one (0xFFFFFFFF: none yet) */
 
@@ -109,7 +136,8 @@ void plat_ble_start(void);
 uint32_t plat_ble_log_total(void);     /* lines written since the last start (survives a reset) */
 const char *plat_ble_log_line(int back);   /* 0 = the newest */
 /* Bluetooth MIDI devices (fm1.toml ble_central = true: FM1B_BLE_CENTRAL 1): the FM-1 connects to one (a keyboard,
- * a controller), beside a computer connected to it. Its MIDI comes in as PORT_BLE too, and TO_BLE goes to both.
+ * a controller), beside a computer connected to it. Its MIDI comes in as PORT_BLE too (plat_midi_in_from:
+ * TO_BLE_DEV), and TO_BLE goes to both (TO_BLE_DEV to the device alone, TO_BLE_HOST to the computer).
  * Scanning finds the devices that advertise the MIDI service (up to 8); connecting stops the scan. */
 #ifndef FM1B_BLE_CENTRAL
 #define FM1B_BLE_CENTRAL 0
@@ -120,10 +148,31 @@ int plat_ble_found(int i, char *name, int *rssi);   /* device i of the scan (nam
 int plat_ble_connect(int i);           /* 0 = connecting */
 void plat_ble_disconnect(void);
 int plat_ble_device(void);             /* BLE_DEV_*: READY is connected, MIDI both ways */
+int plat_ble_passkey(void);            /* a pairing with a device waits for its user to type this code (0..999999):
+                                        * show it; -1: none (ble_stack = "own" only: an iPhone app asks for one) */
 /* Bluetooth on or off, as the player asks: off ends every link, stops advertising and scanning (the radio quiet);
  * on starts it (or advertises again). Whether it starts at power-on: APP_BLE_AT_BOOT (app.h, e.g. a saved setting;
  * default 1) */
 void plat_ble_enable(int on);
+
+/* Bluetooth audio out (fm1.toml bt_audio = true, with ble_stack = "own": FM1B_BT_AUDIO 1): an A2DP source to headphones
+ * and speakers (SBC), beside Bluetooth MIDI on the one radio. While it streams, the render goes to the device and the
+ * FM-1's own output is muted. Four devices are remembered with their keys (in OBJ_BLE), the last one first. Expect
+ * 150-300 ms from a key to the ear (the device's own buffer): for listening, not for playing in time. */
+#ifndef FM1B_BT_AUDIO
+#define FM1B_BT_AUDIO 0
+#endif
+enum { PLAT_BTA_OFF, PLAT_BTA_SCANNING, PLAT_BTA_FOUND, PLAT_BTA_NONE, PLAT_BTA_PAGING, PLAT_BTA_LINKED, PLAT_BTA_SETUP,
+       PLAT_BTA_STREAMING, PLAT_BTA_REFUSED, PLAT_BTA_NO_LAST, PLAT_BTA_FAILED, PLAT_BTA_READY };
+void plat_bta_on(int on);              /* on: the radio up (Bluetooth MIDI's start, if not yet), ready to scan / connect */
+void plat_bta_scan(int on);            /* look for devices (about 10 s) */
+int plat_bta_found(int i, char *name); /* found device i: its name (17 bytes) -> 0: none */
+int plat_bta_known(int i, char *name); /* remembered device i (0 the last one) -> 0: none */
+void plat_bta_pick(int i);             /* connect found device i (pairing if new; it becomes the last one) */
+int plat_bta_reconnect(int i);         /* connect remembered device i -> 0 paging */
+void plat_bta_forget(int i);
+void plat_bta_hangup(void);
+int plat_bta_state(void);              /* PLAT_BTA_* */
 
 /* WiFi (fm1.toml wifi = true: FM1B_WIFI 1): a station on JieLi's WiFi libraries and the SDK's lwIP, on the same shim.
  * Off until the app turns it on; then it joins the networks it joined before (kept in the app's store object OBJ_WIFI,
@@ -142,6 +191,7 @@ int plat_wifi_rssi(void);              /* connected: the signal */
 int plat_wifi_scan(void);              /* the networks around: plat_wifi_found once it is done (0 = asked) */
 int plat_wifi_found(int i, char *ssid, int *rssi, int *secured);   /* the scan's network i (ssid: 33 bytes), the
                                                                      * strongest first; 0 = none */
+int plat_wifi_found_channel(int i);    /* its channel (1..14), 0 = none */
 int plat_wifi_join(const char *ssid, const char *pass);   /* pass 0: the saved one's, or none; kept once joined */
 int plat_wifi_saved(int i, char *ssid);   /* the networks kept, the most recent first; 0 = none */
 void plat_wifi_forget(int i);
@@ -213,6 +263,10 @@ void plat_usb_audio_full(int on);
 void plat_sense(int on);
 uint32_t plat_analog_mask(void);       /* bit k: key k is on an analog row (PA7 / PA8; the top row is probed) */
 
+/* 16 bytes unique to this FM-1 (its flash part's factory ID; the same across updates, firmwares and a wiped store):
+ * for an address that must not change (the WiFi MAC, the Bluetooth name); 0 = unknown (and in a build without a radio) */
+const uint8_t *plat_chip_uid(void);
+
 /* persistent storage (Felucca storage.c objects: A/B sectors, CRC, torn-write safe) */
 int plat_store_load(uint32_t obj, void *dst, uint32_t max);   /* bytes loaded, < 0 = none / bad (an empty object is
                                                                * none: a restore writes one for an absent object) */
@@ -230,6 +284,35 @@ int plat_store_save(uint32_t obj, const void *src, uint32_t len);   /* 0 = ok */
 /* audio load in % of the render budget, and xruns since boot (device: from the ISR) */
 uint32_t plat_cpu_pct(void);
 uint32_t plat_xruns(void);
+
+/* a free-running count of PLAT_TICKS_PER_US ticks a microsecond, for timing spans shorter than plat_ms can: a part of
+ * the render, say. Device: TIMER4, from the 24 MHz crystal (one register read); host: its monotonic clock, at the same
+ * rate. No lock and no state, so the audio interrupt and the tick may call it too. It wraps every 2^32 ticks (179 s):
+ * a span is the unsigned difference of two reads */
+#define PLAT_TICKS_PER_US 24u
+uint32_t plat_ticks24(void);
+
+/* The second core (fm1.toml cpu2 = true: FM1B_CPU2; felucca-bsp's chip/fm1_cpu1.h, Melodee's): a worker for a part of
+ * the render. Start it in app_init (the one time it may start: at power-on, before the audio and the timers); the
+ * render hands it a job, does its own share, then waits for it. One job at a time. A failure (it misread a job, it
+ * faulted, a job was not back in 8 ms, it did not answer at its start) restarts the FM-1, the reason in the crash
+ * record (vec 0x101..0x105: gave_up's numbers below); two failed starts are safe mode. With cpu2_fallback = true
+ * instead: it is given up (held; the render does the work itself) and barred, one core at every start until
+ * power-off or a new build (FM1B_BUILD), and one core after a failed start. Host: a job runs at once, in order (an app
+ * with its own simulation defines APP_HOST_CPU2 and has them all). */
+int plat_cpu2_set(int on);             /* on 1, in app_init: 0 = it runs; -1 = one core (not now, barred, or it did not
+                                        * answer). On 0: held (from the main loop: no job outstanding) */
+int plat_cpu2_on(void);                /* it takes jobs */
+int plat_cpu2_run(void (*fn)(uint32_t), uint32_t arg);   /* render: 1 = it has fn(arg); 0 = do it yourself */
+int plat_cpu2_wait(void);              /* render: 0 = done; -1 = it was given up and the job dropped: do it yourself
+                                        * (cpu2_fallback only) */
+void plat_cpu2_sync(void);             /* a barrier between the cores' reads and writes (a job's own sharing) */
+int plat_cpu2_busy(void);              /* 1 = the job handed over is not done yet (no waiting) */
+int plat_cpu2_gave_up(void);           /* why it is off: 0 no, 1 it misread a job, 2 one was late, 3 barred, 4 it
+                                        * faulted, 5 it did not answer at its start */
+uint32_t plat_cpu2_bad(void);          /* the jobs it misread */
+int plat_cpu2_barred(void);            /* 1: one core until power-off (given up, or the first core crashed beside it) */
+uint32_t plat_cpu2_stack(void);        /* how deep its stack (2816 B) has gone, in bytes */
 
 /* the app's optional hooks (app.h defines the macro when it has the function):
  *   APP_TICK        void app_tick(void)           1 kHz, in the timer interrupt (a clock, a sequencer)
@@ -254,9 +337,10 @@ uint32_t plat_xruns(void);
  *   APP_REDRAW      void app_redraw(void)        draw the whole screen again at the next frame (the mirror lost a part)
  *   APP_MIRROR_TEST int app_mirror_test(int on)  the mirror's remote asks for a test session (on 1, off 0): 1 done
  *   APP_CSTART      void app_cstart(void)         first thing at a start, before the RAM is cleared and with nothing
- *                   set up (registers only, no RAM): an app's second core that a reset left running, held
+ *                   set up (registers only, no RAM): an app's own second core that a reset left running, held
+ *                   (fm1-base's own, cpu2 = true, needs none of these)
  *   APP_FAULT       void app_fault(const fm1_crash_t *c)   a crash, before the crash screen (c: the record): an app's
- *                   second core given up; or the crash is on that core (c->sp on its stacks): it stops there
+ *                   own second core given up; or the crash is on that core (c->sp on its stacks): it stops there
  *
  * Screen mirroring (fm1.toml mirror = true: FM1B_MIRROR 1, device/mirror.c): the screen and the panel live on a
  * computer (base/web/mirror/, tools/fm1_mirror.py), and the panel played from it. Nothing for the app to call; an app
