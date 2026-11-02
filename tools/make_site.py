@@ -6,15 +6,17 @@
 
   index.html                  the front page (APP_DIR/site/landing.md, with {{VERSION}} and {{PKG}} filled in; its
                               images from APP_DIR/site/img)
-  install/index.html          the web installer (web/installer.html, with fm1pkg.js, fm1ota.js and the package's
-                              metadata inlined; Chrome or Edge, Web MIDI)
+  install/index.html          the web installer (web/installer.html, with fm1ports.js, fm1pkg.js, fm1ota.js and the
+                              package's metadata inlined; Chrome or Edge, Web MIDI)
   manual/index.html, img/     the manual (APP_DIR/docs/MANUAL.md, its images from APP_DIR/docs/img), if there is one
   emu/                        the firmware in the browser (APP_DIR/build/emu: tools/build.py APP_DIR --web)
   words/                      the screen reader's words files (APP_DIR/web/words), every one ever made
-  mirror/index.html           the screen mirror (web/mirror/index.html), with mirror = true
-  backup/index.html           backup and restore in the browser (web/backup/index.html), with backup = true: its
-                              magic and version from APP_DIR/app.h (APP_BACKUP_MAGIC, APP_BACKUP_VERSION)
+  mirror/index.html           the screen mirror (web/mirror/index.html, with fm1ports.js inlined), with mirror = true
+  backup/index.html           backup and restore in the browser (web/backup/index.html, with fm1ports.js inlined), with
+                              backup = true: its magic and version from APP_DIR/app.h (APP_BACKUP_MAGIC, APP_BACKUP_VERSION)
   firmware/NAME-VERSION.fwsc  the package the installer writes; also the download
+  firmware/NAME-VERSION-res.bin  the resource region (fm1.toml resources), when PKG_STEM-res.bin is beside the
+                              package (tools/build.py): the installer writes it after the firmware
   firmware/m-bootloader-X.Y.fwsc  m-bootloader (MIT), which the installer offers after the firmware
 
   tools/make_site.py APP_DIR APP_DIR/build/NAME-VERSION.fwsc VERSION OUT_DIR
@@ -52,6 +54,11 @@ def product_of(raw):
     return "".join(chr((m - i - 1) & 0xFF) for i in range(BLOCKS) if (m := raw[i * BLK + KEEP]) != 0x7D)
 
 
+def ports_js():
+    """web/fm1ports.js (finding FM-1s on Web MIDI) as plain script, for a page's {{PORTS_JS}}"""
+    return strip_module((SRC / "web" / "fm1ports.js").read_text(encoding="utf-8"))
+
+
 def fill(html, values, what):
     """a page's {{KEY}}s filled in; every one must be"""
     for key, val in values.items():
@@ -86,10 +93,12 @@ def tool_pages(app, conf=None, values=None):
     out = {}
     if conf.get("mirror"):
         out["mirror/index.html"] = fill((SRC / "web" / "mirror" / "index.html").read_text(encoding="utf-8"),
-                                        dict({"NAME": conf.get("name", app.name)}, **(values or {})), "web/mirror")
+                                        dict({"NAME": conf.get("name", app.name), "PORTS_JS": ports_js()}, **(values or {})),
+                                        "web/mirror")
     if conf.get("backup"):
         out["backup/index.html"] = fill((SRC / "web" / "backup" / "index.html").read_text(encoding="utf-8"),
-                                        dict(backup_values(app, conf), **(values or {})), "web/backup")
+                                        dict(backup_values(app, conf), PORTS_JS=ports_js(), **(values or {})),
+                                        "web/backup")
     return out
 
 
@@ -119,6 +128,15 @@ def main(app, pkg, version, out):
     for d in ("install", "firmware"):
         (out / d).mkdir(parents=True)
     shutil.copy(pkg, out / "firmware" / name)
+    # the resource region beside the package (tools/build.py: fm1.toml resources), checked as the FM-1 checks it
+    res_src, res_name = pkg.with_name(pkg.stem + "-res.bin"), Path(name).stem + "-res.bin"
+    if res_src.exists():
+        from fm1_resources import ResError, payload_of
+        try:
+            payload_of(res_src.read_bytes())
+        except ResError as e:
+            raise SystemExit(f"{res_src}: {e}")
+        shutil.copy(res_src, out / "firmware" / res_name)
     # m-bootloader (MIT), which the installer offers to install after the firmware, with its licence
     boot = SRC / "web" / "m-bootloader" / f"fm1-uboot-{MBOOT_VERSION}.fwsc"
     boot_name = f"m-bootloader-{MBOOT_VERSION}.fwsc"
@@ -128,10 +146,11 @@ def main(app, pkg, version, out):
         shutil.copy(lic, out / "firmware" / lic.name)      # files, an own-stack build's Apache / BSD parts): beside them
     # the installer
     html = (SRC / "web" / "installer.html").read_text(encoding="utf-8")
-    lib = strip_module((SRC / "web" / "fm1pkg.js").read_text(encoding="utf-8")) + "\n" + \
-        strip_module((SRC / "web" / "fm1ota.js").read_text(encoding="utf-8"))
+    lib = "\n".join(strip_module((SRC / "web" / f).read_text(encoding="utf-8"))
+                    for f in ("fm1ports.js", "fm1pkg.js", "fm1ota.js"))
     meta = json.dumps({"version": version, "product": product, "pkg": "../firmware/" + name,
                        "backup": bool(conf.get("backup")),
+                       "res": "../firmware/" + res_name if res_src.exists() else None,
                        "boot": {"pkg": "../firmware/" + boot_name, "version": MBOOT_VERSION,
                                 "sha256": hashlib.sha256(boot.read_bytes()).hexdigest()}})
     for mark in ("/*LIB*/", "/*META*/"):
@@ -139,7 +158,9 @@ def main(app, pkg, version, out):
             raise SystemExit(f"web/installer.html must contain {mark} once")
     repo = conf.get("repo", "")
     credits = conf.get("credits", "")
-    for key, val in (("NAME", conf["name"]), ("REPO", repo), ("REPO_SHORT", re.sub(r"^https?://", "", repo)),
+    for key, val in (("RES", conf.get("resources_what", "{{NAME}}'s data")),   # (fm1.toml: what the resource
+                     ("RES_JA", conf.get("resources_what_ja", "{{NAME}} のデータ")),   # region holds, in the page's words)
+                     ("NAME", conf["name"]), ("REPO", repo), ("REPO_SHORT", re.sub(r"^https?://", "", repo)),
                      ("LICENSE", conf.get("licence", "MPL-2.0")), ("CREDITS", " " + credits if credits else "")):
         html = html.replace("{{" + key + "}}", val)
     # the firmware's own steps around an install (fm1.toml install_app = "web/install_app.js": an expression, an
@@ -173,7 +194,8 @@ def main(app, pkg, version, out):
         (out / p).write_text(h, encoding="utf-8")
     (out / ".nojekyll").write_text("")
     print(f"site: {out}: index.html, install/ ({product}), {'manual/, ' if manual.exists() else ''}emu/, words/, "
-          f"{''.join(p.split('/')[0] + '/, ' for p in tools)}firmware/{name} ({len(raw)} B)")
+          f"{''.join(p.split('/')[0] + '/, ' for p in tools)}firmware/{name} ({len(raw)} B)"
+          f"{f', firmware/{res_name}' if res_src.exists() else ''}")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,9 @@ the FM-1 restarts and the installed identity is checked.
   fm1_install.py --info [--port NAME]
 
 If the FM-1 is still in update mode (an earlier install was cut off), the
-install finishes the write. Needs mido with python-rtmidi.
+install finishes the write. The FM-1 is found by its port's name (--port: only
+that one), or else by its answer to the screen reader's HELLO, which every
+fm1-base firmware gives (tools/fm1ports.py). Needs mido with python-rtmidi.
 
 Exit codes: 0 done, 1 cancelled or other error, 2 bad arguments or package,
 3 FM-1 not found, 4 connection lost or the device stopped, 5 timeout (no
@@ -22,10 +24,14 @@ loader / no restart), 6 wrong model, or another identity after the install.
 """
 import argparse
 import hashlib
+import os
 import queue
 import re
 import sys
 import time
+
+import fm1ports
+from fm1ports import PORT_RE, pair_output  # noqa: F401 (the usual port names; an input's output: fm1ports.py)
 
 HS_QUERY = bytes([0xF0, 0x00, 0x32, 0x45, 0x00, 0x00, 0x00, 0x40, 0x7F, 0xF7])
 UPGRADE = bytes([0xF0, 0x22, 0x24, 0x35, 0x7F, 0xF7])
@@ -33,13 +39,11 @@ FINISH_CHECK, FINISH_WRITE = 0xE0000000, 0xF0000000
 MAXDATA = 512
 BLOCKS, BLK, KEEP = 20, 0x30, 0x2F
 LOADER_MARK = b"FELUCCA-LOADER-1"
-PORT_RE = re.compile(r"fm-?1|smk|elite|mke-p37|starry|felucca|ota|composite|sinco|usb-midi", re.I)   # never probe other gear
-# (smk|elite|mke-p37|starry: the M-VAVE SMK-37 under its model names, BOARD_SMK37)
 
 # seconds; the tests shorten them
 DELAY = {"open": 0.3, "start": 2.0, "reply": 0.01, "loader": 3.0, "reboot": 3.0, "retry": 1.0,
          "poll": 1.0, "hs": 1.0, "idle_check": 8.0, "idle_write": 180.0,
-         "wait_loader": 30.0, "wait_reboot": 40.0}
+         "wait_loader": 30.0, "wait_reboot": 40.0, "hello": fm1ports.TIMEOUT}
 
 # M-VAVE's FM1 Open firmware (V10, 2026-10): its updater takes only a package it has been told about
 # first (cmd 49 reads its state, cmd 50 arms it with the image length and the package's SHA-256); then
@@ -211,6 +215,8 @@ class MidoBackend:
     def __init__(self):
         import mido
         self.mido = mido
+        self.answered = set()               # ports that answered the screen reader's HELLO (Updater.answering),
+        self.asking = fm1ports.Asking()     # and how often each other one was asked: for every Updater on it
 
     def input_names(self):
         return list(dict.fromkeys(self.mido.get_input_names()))
@@ -221,15 +227,9 @@ class MidoBackend:
     def open(self, in_name, out_name):
         return MidoLink(self, in_name, out_name)
 
-
-def pair_output(name, outs):
-    if name in outs:
-        return name
-    base = re.sub(r"\s+\d+$", "", name)     # Windows numbers each port
-    same = [o for o in outs if re.sub(r"\s+\d+$", "", o) == base]
-    if len(same) == 1:
-        return same[0]
-    return outs[0] if len(outs) == 1 else None
+    def hello(self, skip, asking):
+        """the input names that answer the screen reader's HELLO (fm1ports.ask: one round), but skip(name)'s"""
+        return [f.input for f in fm1ports.ask(self.mido, skip=skip, tries=1, timeout=DELAY["hello"], asking=asking)]
 
 
 # --------------------------------------------------------------- updater ---
@@ -283,6 +283,15 @@ class Updater:
     def __init__(self, backend, port=None):
         self.backend = backend
         self.port = port
+        # ports that answered the screen reader's HELLO, asked as usual ones; each other port sent a HELLO at most
+        # three times. The backend's, when it keeps them: the same for every Updater on it (fm1_backup.find makes one
+        # a try)
+        self.answered = getattr(backend, "answered", None)
+        self.answered = set() if self.answered is None else self.answered
+        self.asking = getattr(backend, "asking", None) or fm1ports.Asking()
+
+    def usual(self, name):
+        return bool(PORT_RE.search(name)) or name in self.answered
 
     def candidates(self, only_port):
         names = self.backend.input_names()
@@ -290,11 +299,29 @@ class Updater:
             mine = [n for n in names if self.port.lower() in n.lower()]
             if only_port:
                 return mine
-            return mine + [n for n in names if n not in mine and PORT_RE.search(n)]
-        return [n for n in names if PORT_RE.search(n)]
+            return mine + [n for n in names if n not in mine and self.usual(n)]
+        return [n for n in names if self.usual(n)]
+
+    def answering(self):
+        """the other ports asked for the screen reader's HELLO (every fm1-base firmware answers it, whatever its port
+        is called; M-VAVE's firmware and the loaders don't) -> the names that answered, asked from then on"""
+        hello = getattr(self.backend, "hello", None)
+        if hello is None:
+            return []
+        got = [n for n in hello(lambda n: self.usual(n) or bool(self.port and self.port.lower() in n.lower()),
+                                self.asking) if n not in self.answered]
+        self.answered.update(got)
+        return got
 
     def find(self, want=None, only_port=True):
-        """the first matching port that answers the handshake (and want(identity))"""
+        """the first matching port that answers the handshake (and want(identity)); when none does, again after
+        asking the other ports for a HELLO (not with only the port asked for)"""
+        dev = self.find_named(want, only_port)
+        if dev or (self.port and only_port) or not self.answering():
+            return dev
+        return self.find_named(want, only_port)
+
+    def find_named(self, want=None, only_port=True):
         outs = self.backend.output_names()
         for name in self.candidates(only_port):
             out = pair_output(name, outs)
@@ -499,7 +526,33 @@ def run(a, backend, out, ask):
         up.install(dev, image, product, prog, digest)
     finally:
         prog.end()
+    res = a.resources or os.path.join(os.path.dirname(a.package), os.path.basename(a.package).rsplit(".", 1)[0] + "-res.bin")
+    if not a.no_resources and os.path.isfile(res):
+        install_resources(backend, res, a.port, out)
     return 0
+
+
+def install_resources(backend, res, port, out):
+    """the firmware's resource region (device/res.c: NAME-res.bin beside the package) after the update; never fails
+    the install: without it the firmware does without (its words for it) until tools/fm1_resources.py writes it"""
+    import fm1_resources as R
+    for _ in range(20):                       # (the FM-1 starting the new firmware)
+        try:
+            dev = __import__("fm1_backup").find(backend, port)
+            break
+        except InstallError:
+            time.sleep(0.5)
+    else:
+        print(f"resources: the FM-1 did not answer after the update; run tools/fm1_resources.py {res}", file=out)
+        return
+    try:
+        code = R.push(dev, open(res, "rb").read(), out)
+        print("resources: " + ("on the FM-1" if not code else R.ERRORS.get(code, f"code {code}") +
+                               f"; run tools/fm1_resources.py {res}"), file=out)
+    except (InstallError, R.ResError, OSError) as e:
+        print(f"resources: {e}; run tools/fm1_resources.py {res}", file=out)
+    finally:
+        dev.link.close()
 
 
 def ask_tty(prompt):
@@ -516,6 +569,9 @@ def main(argv=None, backend=None, out=sys.stdout, ask=ask_tty):
     ap.add_argument("--port", metavar="NAME", help="MIDI port to use (part of its name)")
     ap.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     ap.add_argument("--force", action="store_true", help="install a package without the Felucca loader marker")
+    ap.add_argument("--resources", metavar="FILE", help="the resource region to write after the update (default: "
+                    "NAME-res.bin beside the package, if there: tools/fm1_resources.py)")
+    ap.add_argument("--no-resources", action="store_true", help="do not write the resource region")
     a = ap.parse_args(argv)
     if bool(a.info) == bool(a.package):
         ap.error("give a PACKAGE.fwsc or --info")

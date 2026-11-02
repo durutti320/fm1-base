@@ -245,6 +245,11 @@ const uint8_t *plat_data(uint32_t off);   /* read in place; 0 = outside the wind
 int plat_data_erase(uint32_t off);        /* the 4 KiB sector at off (aligned); 0 = done */
 int plat_data_write(uint32_t off, const void *src, uint32_t n);   /* into erased flash, src in RAM; 0 = done */
 void plat_sysex_send(const uint8_t *frame, uint32_t n);   /* a whole SysEx frame (F0 .. F7) out over USB */
+/* the resource region (fm1.toml resources = FILE, FM1B_RES; app.h APP_RES_BASE, APP_RES_SECTORS: device/res.c):
+ * the file's bytes read in place, *len their count; 0 (and *len 0) while the FM-1 does not hold this build's (not
+ * yet written after an update, torn, another build's): the app does without. The host writes it
+ * (tools/fm1_resources.py; the installer after an update); a sound reading it is stopped first (app_panic) */
+const uint8_t *plat_res(uint32_t *len);
 
 /* the app's own commands in the update's SysEx framing (F0 pack7(00 59 cmd len24 body ~sum) F7: felucca-bsp ota.c),
  * an app with APP_USB_CMD: app_usb_cmd(d, n) gets each frame whose cmd the platform does not take (d: the decoded
@@ -274,9 +279,16 @@ int plat_store_head(uint32_t obj, void *dst, uint32_t n);     /* its first n byt
                                                                * shorter */
 int plat_store_size(uint32_t obj);                           /* its length in bytes, < 0 = none / bad (an app that
                                                                * wants it whole or not at all checks it first) */
-int plat_store_save(uint32_t obj, const void *src, uint32_t len);   /* 0 = ok */
+int plat_store_save(uint32_t obj, const void *src, uint32_t len);   /* 0 = ok; -8: the pool is full (nothing written) */
+/* an app with a pool (app.h APP_STORE_POOL: storage.c): the sectors free for its pooled objects' next copies (a save
+ * of n objects that finds n keeps every previous copy); -1 no pool */
+int plat_store_room(void);
 #define PLAT_STORE_MAX 3840u           /* bytes per object */
-/* The objects are the app's (app.h): an enum that includes OBJ_PANEL (the panel calibration, the platform's) and
+/* An app may pool some objects (APP_STORE_POOL, APP_STORE_POOL_BASE / _N / _OBJ0 / _OBJN / _OLD: storage.c): those
+ * share sectors instead of a pair each, and APP_STORE_MAP's entries for them are not used. APP_STORE_POOL_EMPTY(obj, p,
+ * n), if the app defines it: true for an old copy that holds nothing worth a sector (a placeholder of the layout
+ * before the pool): the move into the pool drops the object instead (every copy of it erased).
+ * The objects are the app's (app.h): an enum that includes OBJ_PANEL (the panel calibration, the platform's) and
  * ends with OBJ_NOBJ, and APP_STORE_MAP, each object's flash offset: two 4 KiB sectors (A/B) from there, inside the
  * data area (0x97000..0xDFFFF) or Felucca's settings sector pair at 0xFC000. An object's number is written in its
  * record, so an app keeps its numbering from one release to the next. */

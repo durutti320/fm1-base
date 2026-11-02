@@ -22,11 +22,20 @@ any of this goes upstream, its author's permission to relicense his files under 
 | Leo Kuroshita's code (from Felucca, through the firmwares below) | [Felucca](https://github.com/hugelton/Felucca), GPL-3.0-only there | his permission to use the Felucca code he owns under MPL-2.0: [hugelton/felucca-bsp#4](https://github.com/hugelton/felucca-bsp/issues/4) |
 | Charles Vestal's code | the platform layer of [fm1-x0x](https://github.com/charlesvestal/fm1-x0x), [fm1-fomni](https://github.com/charlesvestal/fm1-fomni) and the other FM-1 firmwares, GPL-3.0-only there | his own |
 | Chris Farrell's code in `web/fm1ota.js` and `web/fm1pkg.js` (each file's header says which) | [fm-static](https://github.com/seajaysec/fm-static), GPL-3.0-only there | his permission to use it under MPL-2.0: [seajaysec/fm-static#1](https://github.com/seajaysec/fm-static/issues/1#issuecomment-6410795859) |
+| `device/boot_lzma.h`, `tools/boot_pack.py` and `boot_image` in `device/main_fm1.c` (the LZMA-packed load images, `boot_pack = true`). Copyright (C) 2026 Kerem Kilic (Ellic Studio) and Charles Vestal | [Melodee](https://github.com/keremimo/melodee) (`firmware/src/boot_lzma.h`, `tools/boot_audio.py`, `firmware/src/main.c`), GPL-3.0-only there | its author's permission to use Melodee's code in fm1-base under MPL-2.0 (stated by fm1-base's maintainer, 2026-10-31) |
+| `device/res.c`, `tools/fm1_resources.py` and the resource step of `tools/fm1_install.py` and the installer page (the resource region, `resources = FILE`); the pooled store in `device/storage.c` (APP_STORE_POOL). Copyright (C) 2026 Charles Vestal | written for fm1-base after [Melodee](https://github.com/keremimo/melodee)'s resource region (`firmware/src/res.c`, `tools/fm1_resources.py`, `web/fm1res.js`) and shared storage pool, by Kerem Kilic (Ellic Studio), GPL-3.0-only there | MPL-2.0, with its author's permission (as above) |
 | `bsp/` | [felucca-bsp](https://github.com/hugelton/felucca-bsp), a git submodule | MPL-2.0 there |
 | `ble/` (the Bluetooth shim and the MIDI service; `ble/wifi`, the WiFi glue) | Charles Vestal's fm1-ble and fm1-radio, used by fm1-ctl | his own; a few parts repeat the JieLi AC79 SDK (below) |
 | `bt/` (the own Bluetooth stack: `bt/ble` BLE MIDI, link layer, host, SMP, central; `bt/br` BR/EDR and the A2DP source: SSP, L2CAP, AVDTP, AVRCP, SDP, AFH), its docs `docs/bt/`, tools `tools/bt/` and tests `tests/bt/`, but the third-party parts below. Copyright (C) 2026 Henri David (hdavid) | [Optimist](https://github.com/w0ts/optimist) (`3274ce5`), where its files carry `GPL-3.0-only OR MPL-2.0` | offered under either licence ([w0ts/optimist#55](https://github.com/w0ts/optimist/issues/55)), taken here under MPL-2.0. The files keep their dual SPDX header; the MPL's Exhibit B does not apply |
 | `device/bt_own.c`, `device/bt_own_central.c`, `device/bt_own_audio.c` (the glue between the own stack and the platform) | Charles Vestal | his own |
 | felucca-bsp's radio drivers (`bsp/chip/fm1_ble.h`, `fm1_ble_rf.h`, `fm1_bredr.h`) | Optimist, by Henri David | MPL-2.0 there, from the same offer (`bsp/NOTICE`) |
+
+The screen reader's firmware side, `device/announce.c` and `tools/gen_words.py` (Charles Vestal's, from
+[fm1-reader](https://github.com/charlesvestal/fm1-reader), where they were MIT), is MPL-2.0 like the rest, and
+fm1-base holds their one copy. The older firmwares that are not on fm1-base (X0X, FoMni-1, MONK-1 and Mocky, which are
+GPL) carry copies made before, which stay under their repositories' licences until fm1-reader's
+`tools/sync_announce.sh` copies them again. MPL-2.0 is compatible with the GPL (its section 3.3), so the new copies
+can go into those firmwares too.
 
 ## The own Bluetooth stack's other parts
 

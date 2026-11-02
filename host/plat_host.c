@@ -31,6 +31,8 @@
  *   expect WHAT VALUE            check state: exit 1 on mismatch; VALUE "<N" / ">N" is a bound
  *   reboot                       re-run boot from the simulated flash (persistence test)
  *   data FILE OFFSET             a file into the simulated data area (plat_data) at OFFSET (its windows: plat.h)
+ *   res 0|1                      (FM1B_RES) the resource region there (1, at start) or not (0: an FM-1 updated
+ *                                without it; plat_res 0)
  *   fbdump FILE                  the screen's pixels raw (240 x 240 RGB565, high byte first) into FILE
  *   flash_fail 0|1               every store save fails (1) or works (0); expect store_tries counts the attempts
  *   clock N [MS]                 N MIDI clocks in (F8) over USB, MS apart (default 21: 119 bpm)
@@ -69,6 +71,9 @@
 #define PLAT_HOST 1
 #ifndef FM1B_MIRROR
 #define FM1B_MIRROR 0                           /* fm1.toml mirror = true (tools/build.py) */
+#endif
+#ifndef FM1B_RES
+#define FM1B_RES 0                              /* fm1.toml resources = FILE */
 #endif
 #ifndef FM1B_BACKUP
 #define FM1B_BACKUP 0                           /* fm1.toml backup = true */
@@ -233,7 +238,11 @@ int32_t plat_enc(int role)
     return v;
 }
 uint32_t plat_master(void) { return mirror_in_master(master); }
-int plat_battery(void) { return 3; }   /* (the host and the emulator: full) */
+#ifdef __EMSCRIPTEN__
+int plat_battery(void) { return -1; }  /* the browser emulator has no battery: not read, so none is shown */
+#else
+int plat_battery(void) { return 3; }   /* (the host simulator: full) */
+#endif
 /* the lights ("leds"): bright, and dim (glow 0: none); PLAY's green counts as PLAY */
 void plat_lights(uint32_t b, uint32_t k, uint32_t db, uint32_t dk, int glow)
 {
@@ -575,6 +584,16 @@ int plat_data_write(uint32_t off, const void *src, uint32_t n)
     return 0;
 }
 void plat_sysex_send(const uint8_t *frame, uint32_t n) { (void)frame, (void)n; }
+#if FM1B_RES
+#include "fm1_res_data.h"                             /* fm1b_res_data: the build's resources (build.py, from the file) */
+static int res_there = 1;                             /* (script "res 0": an FM-1 without them) */
+const uint8_t *plat_res(uint32_t *len)
+{
+    if (len)
+        *len = res_there ? (uint32_t)sizeof fm1b_res_data : 0u;
+    return res_there ? fm1b_res_data : 0;
+}
+#endif
 /* no host to pull from (an app's transfer is tested on its own, or by writing the flash: "data") */
 int plat_host_read(uint32_t addr, uint8_t *dst, uint32_t n) { (void)addr, (void)dst, (void)n; return -1; }
 void plat_host_patience(uint32_t try_ms, uint32_t total_ms) { (void)try_ms, (void)total_ms; }
@@ -625,6 +644,7 @@ int plat_store_size(uint32_t obj)
     store_ready();
     return obj >= OBJ_NOBJ || store_len[obj] <= 0 ? -1 : store_len[obj];
 }
+int plat_store_room(void) { return -1; }   /* (the simulator's store has no pool) */
 int plat_store_save(uint32_t obj, const void *src, uint32_t len)
 {
     store_ready();
@@ -1562,6 +1582,10 @@ int main(int argc, char **argv)
             printf("\n");
         } else if (!strcmp(cmd, "expect"))
             fails += expect(a, b);
+#if FM1B_RES
+        else if (!strcmp(cmd, "res"))             /* res 0|1: the resource region there or not */
+            res_there = atoi(a) != 0;
+#endif
         else if (!strcmp(cmd, "data")) {          /* data FILE OFFSET: a file into the data area (plat_data) */
             FILE *df = fopen(a, "rb");
             uint32_t off = (uint32_t)strtoul(b, 0, 0);

@@ -6,6 +6,8 @@
  * 10 kHz), audio (ALNK0), USB; then the main loop: UI at ~60 frames/s, input polled in between. */
 extern uint32_t _data_start[], _data_end[], _data_load[], _bss_start[], _bss_end[];
 extern uint32_t _pool_start[], _pool_end[], _rt_start[], _rt_end[], _rt_load[];
+extern uint8_t _app_xip_end[];
+#include "boot_lzma.h"
 
 /* --------------------------------------------------------------- audio --- */
 /* HALF_FRAMES (unity.c, from APP_BLOCK): the I2S half buffer, 256 frames = 5.8 ms at 44.1 kHz by default */
@@ -719,6 +721,24 @@ static void usb_cmd(uint32_t d)
         return;
     }
 #endif
+#if FM1B_RES
+    if (d == 15u && ota_dec[2] == RES_REQ && flash_ok) {   /* the resource region from the host (res.c) */
+        uint32_t len = ota_rd32(ota_dec + 6), crc = ota_rd32(ota_dec + 10);
+        int begun = 0, rc;
+        if (bu.on)
+            bu_stop();
+        ota_try_ms = 2000u;
+        ota_deadline = ota_now_ms() + 120000u;
+        rc = res_rx(len, crc, &begun);
+        ota_try_ms = 5000u;
+        ota_deadline = 0;
+        if (begun) {
+            app_ui_init();
+            app_say("RESOURCES", !rc ? "INSTALLED" : "NOT INSTALLED");
+        }
+        return;
+    }
+#endif
 #if FM1B_MIRROR
     if (d == 8u && ota_dec[2] == MR_REQ) {
         mirror_cmd(ota_dec[6]);                     /* the screen mirrored: on, off, refresh */
@@ -902,8 +922,14 @@ static void fm1_main(void)
 #if FM1B_BACKUP
             rs_boot();                              /* a restore's commit cut short by a power loss: finished */
 #endif
+#ifdef APP_STORE_POOL
+            st_pool_boot();                         /* the A/B pairs from before the pool moved into it (storage.c) */
+#endif
             ota_boot_cleanup();
             fl_plain_window_init();                 /* the data area read in place, unencrypted (plat_data) */
+#if FM1B_RES
+            res_check();                            /* the resource region: this build's? (res.c, plat_res) */
+#endif
         }
     }
     lcd_init();
@@ -1080,6 +1106,22 @@ static void fm1_main(void)
     }
 }
 
+/* one boot-packed load image at rec (tools/boot_pack.py: magic, packed bytes, raw bytes, 0, the stream) into start .. end;
+ * the next record. The decoder's tables in the pool (cleared after, unused before). After Melodee's (main.c boot_image,
+ * Kerem Kilic and Charles Vestal; with permission) */
+static __attribute__((noinline)) const uint32_t *boot_image(const uint32_t *rec, uint32_t *start, uint32_t *end)
+{
+    uint32_t bytes = (uint32_t)((uintptr_t)end - (uintptr_t)start), packed;
+    if ((uintptr_t)(rec + 4) > (uintptr_t)_app_xip_end || rec[0] != BOOT_LZMA_MAGIC || rec[2] != bytes || rec[3] != 0)
+        fm1_enter_uboot();
+    packed = rec[1];
+    if (packed > (uintptr_t)_app_xip_end - (uintptr_t)(rec + 4) ||
+        !boot_lzma((uint8_t *)start, bytes, (const uint8_t *)(rec + 4), packed, (uint16_t *)_pool_start))
+        fm1_enter_uboot();
+    return rec + 4 + (packed + 3u) / 4u;
+}
+_Static_assert(BOOT_LZMA_PROBS * 2u <= 65536u, "the boot decoder's tables fit the pool (its least, 64 KB)");
+
 void fm1_cstart(void)
 {
     uint32_t *s, *d, p3, src, wdt;
@@ -1116,12 +1158,19 @@ void fm1_cstart(void)
     fm1_irq_init();
     for (d = _bss_start; d < _bss_end; d++)
         *d = 0;
+    if (_rt_load[0] == BOOT_LZMA_MAGIC) {
+        /* the load images boot-packed (fm1.toml boot_pack, tools/boot_pack.py), .ram_text's then .data's, the decoder's
+         * tables in the pool, cleared after; one that does not unpack exactly: update mode */
+        const uint32_t *at = boot_image(_rt_load, _rt_start, _rt_end);
+        (void)boot_image(at, _data_start, _data_end);
+    } else {
+        for (s = _data_load, d = _data_start; d < _data_end; s++, d++)
+            *d = *s;
+        for (s = _rt_load, d = _rt_start; d < _rt_end; s++, d++)
+            *d = *s;
+    }
     for (d = _pool_start; d < _pool_end; d++)
         *d = 0;
-    for (s = _data_load, d = _data_start; d < _data_end; s++, d++)
-        *d = *s;
-    for (s = _rt_load, d = _rt_start; d < _rt_end; s++, d++)
-        *d = *s;
     fm1_mailbox_clear();
     fm1_guard_enable(FM1_GUARD_STACK | FM1_GUARD_WRITE | FM1_GUARD_BUS | FM1_GUARD_PC);
     safe_mode = (uint8_t)(p3 >> 8);

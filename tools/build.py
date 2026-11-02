@@ -20,6 +20,8 @@ APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
   usb_product = "..."
   o2 = ["dsp/engine.c"]      separate units compiled at -O2 (the app's DSP), relative to APP_DIR (globs too); each with
                              its own directory on the include path
+  unity_opt = "z"            the unity build (the platform, the app but its o2 units) at -Oz instead of -Os: smaller,
+                             a little slower (what runs in the audio interrupt outside the o2 units, too)
   o2_cflags = ["-DX=1"]      more flags for those; o2_include = ["lib/prefix.h"]: a header included first in each
   include = ["dsp/lib"]      more include directories, relative to APP_DIR
   device_include = ["inc"]   include directories for the firmware only (headers the toolchain lacks)
@@ -47,7 +49,16 @@ APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
   usb_audio_out = true       a computer plays through the FM-1 over USB (FM1B_UAC_OUT; the default: true)
   usb_audio_first = true     the USB audio streaming interfaces listed first in the audio control collection
                              (felucca-bsp FELUCCA_UAC_AS_FIRST, from Felucca 1.5.1): macOS then shows the FM-1 as an audio
-                             device beside its MIDI; bcdDevice +0.08 (a changed device to the computer)
+                             device beside its MIDI; bcdDevice +0.08 (a changed device to the computer). Not enough
+                             for macOS 13-15 (fm1-loom#7, Felucca #67): usb_midi_last is; with it this changes nothing
+  usb_midi_last = false      the USB MIDI interface after the audio streaming ones (felucca-bsp FELUCCA_UAC_MIDI_LAST;
+                             the default: true, with usb_audio_in): audio control, audio in, audio out, MIDI, and the
+                             audio control collection in that order. macOS 13-15 show no USB audio device while MIDI is
+                             interface 1, between audio control and audio streaming (bisected by darosh on macOS 15.8.1);
+                             bcdDevice +0.80. false: the order of fm1-base before 2026-10-31 (MIDI interface 1).
+                             2: MIDI left out of the collection too (a test build: no USB MIDI on Linux)
+  usb_iad = true             without the USB console, an interface association descriptor over the audio function, the
+                             device then misc / IAD (felucca-bsp FELUCCA_UAC_IAD; the default: false); bcdDevice +2.00
   usb_host = true            the USB port as a MIDI host when the app asks (FM1B_USB_HOST: felucca-bsp's
                              FELUCCA_USB_HOST, docs/USB_HOST.md; plat_usb_host in plat.h): a USB-MIDI controller or
                              synth, directly or behind one powered hub (the FM-1 gives no power). Boot is a device
@@ -57,6 +68,12 @@ APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
                              pool spare the build insists on (8192 B; a demo build may spend it)
   backup = true              backup and restore of the app's saved objects over USB (FM1B_BACKUP: device/backup.c;
                              tools/fm1_backup.py); app.h gives APP_BACKUP_OBJS, _MAGIC, _VERSION and the app_backup_* hooks
+  resources = "FILE"         the resource region (FM1B_RES: device/res.c, plat_res in plat.h; with backup): FILE (relative
+                             to APP_DIR, {gen} the generated headers' directory: an app's gen step may make it) kept out
+                             of the image in app.h's APP_RES_BASE, APP_RES_SECTORS, written by the host after an update
+                             (tools/fm1_resources.py, fm1_install.py and the installer page: build/NAME-res.bin beside
+                             the package); the host and web builds have it compiled in. resources_what (and
+                             resources_what_ja): what it holds, in the installer's words ("the 909 cymbals")
   cpu2 = true                the second core (FM1B_CPU2: device/cpu2.c, plat_cpu2_* in plat.h, on felucca-bsp's
                              chip/fm1_cpu1.*): a worker for a part of the render. A failure of it (a misread, a
                              fault, a late job) restarts the FM-1, the reason in the crash record (Melodee's releases)
@@ -64,6 +81,9 @@ APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
                              hash of the sources, lifts that bar for a new build
 Optional parts: only what an fm1.toml asks for is built in (Bluetooth, USB audio; an app's lib/touch by APP_TOUCH in
 app.h); the build prints what it has.
+  boot_pack = true           .ram_text and .data stored LZMA-packed (tools/boot_pack.py, Melodee's; device/boot_lzma.h): the
+                             boot unpacks them, the decoder's tables in the pool before it is cleared (about 9 KB of
+                             flash back on a large app)
   ble_stack = "own"          with ble: Optimist's own Bluetooth stack (bt/: Henri David's, docs/bt/BLE-STACK.md;
                              FM1B_BLE_OWN) instead of JieLi's libraries: nothing of the SDK's linked, no shim
   ble_pairing = true         with ble_stack = "own": pairing and an encrypted link (LE legacy pairing, Just Works),
@@ -114,6 +134,7 @@ APP = OUT = GEN = LDR = ROOT = None               # set by main() from APP_DIR
 CONF = {}
 sys.path.insert(0, str(SRC / "tools"))
 import fm1pkg_make  # noqa: E402
+import boot_pack  # noqa: E402
 import lz4blk  # noqa: E402
 
 APP_XIP = 0x02000120                # app.bin offset 0 in the XIP map; the SPL jumps here
@@ -272,6 +293,43 @@ def generate():
         if r.returncode:
             sys.stderr.write(r.stderr)
             raise SystemExit(f"build: {c[0]} failed")
+    if CONF.get("resources"):
+        gen_resources()
+
+
+RES_MAGIC = 0x31534552                        # "RES1" (device/res.c)
+
+
+def res_payload():
+    """the resource region's payload: fm1.toml resources = FILE"""
+    f = APP / CONF["resources"].replace("{gen}", str(GEN))
+    if not f.is_file():
+        raise SystemExit(f"build: fm1.toml resources {CONF['resources']!r}: no such file ({f})")
+    return f.read_bytes()
+
+
+def res_file(payload):
+    """NAME-res.bin: the region as the FM-1 holds it, its header (the commit record) then the payload"""
+    import zlib
+    crc = zlib.crc32(payload)
+    head = struct.pack("<7I", RES_MAGIC, len(payload), crc, 0, 0, 0, 0)
+    return head + struct.pack("<I", zlib.crc32(head)) + payload
+
+
+def gen_resources():
+    """fm1_res.h (the payload's length and CRC-32: device/res.c checks the region against them) and fm1_res_data.h
+    (the payload itself, for the host and web builds)"""
+    import zlib
+    if not CONF.get("backup"):
+        raise SystemExit("build: fm1.toml resources needs backup = true (the transfer is the restore's)")
+    p = res_payload()
+    if not p:
+        raise SystemExit("build: fm1.toml resources: an empty file")
+    (GEN / "fm1_res.h").write_text("/* generated by tools/build.py from fm1.toml resources: device/res.c */\n#pragma once\n"
+                                   f"#define FM1B_RES_LEN {len(p)}u\n#define FM1B_RES_CRC {zlib.crc32(p):#010x}u\n")
+    rows = ",\n".join(",".join(str(b) for b in p[i:i + 32]) for i in range(0, len(p), 32))
+    (GEN / "fm1_res_data.h").write_text("/* generated by tools/build.py from fm1.toml resources: host/plat_host.c */\n"
+                                        "#pragma once\nstatic const uint8_t fm1b_res_data[] = {\n" + rows + "};\n")
 
 
 # ---- update loader
@@ -556,6 +614,9 @@ def radio_units():
 
 
 
+BOOT_PACKED = None                                # (raw, packed) bytes of the boot-packed load images, or None
+
+
 def build_app():
     flags = [*CFLAGS, *FPU, *inc(BSP / "chip", BSP / "boards" / BOARD, SRC / "device", SRC / "include", SRC / "lib", APP, GEN,
                                  *(APP / d for d in CONF.get("include", []) + CONF.get("device_include", [])))]
@@ -585,6 +646,12 @@ def build_app():
             flags.append(f"-D{flag}={int(bool(CONF[key]))}")
     if CONF.get("usb_audio_first"):
         flags.append("-DFELUCCA_UAC_AS_FIRST=1")
+    midi_last = CONF.get("usb_midi_last", True)   # (the bsp leaves it out without the USB audio input)
+    if midi_last not in (True, False, 0, 1, 2):
+        raise SystemExit(f"fm1.toml: usb_midi_last is true, false or 2, not {midi_last!r}")
+    flags.append(f"-DFELUCCA_UAC_MIDI_LAST={int(midi_last)}")
+    if CONF.get("usb_iad"):
+        flags.append("-DFELUCCA_UAC_IAD=1")
     for flag in ("FM1B_CDC", "FM1B_UAC", "FM1B_UAC_OUT", "FM1B_TRS"):
         v = os.environ.get(flag)    # unset: fm1.toml's, the app's (app.h) or the platform's default (device/unity.c)
         if v in ("0", "1"):
@@ -598,6 +665,10 @@ def build_app():
     if CPU2:
         flags += ["-DFM1_CPU1=1", f"-DFM1B_BUILD={build_id():#010x}u", f"-DFM1_CPU1_FALLBACK={int(bool(CONF.get('cpu2_fallback')))}"]
     o2 = [f if f != "-Os" else "-O2" for f in flags]
+    unity_opt = CONF.get("unity_opt", "s")        # the unity build's level: -Os, or -Oz (the o2 units stay -O2)
+    if unity_opt not in ("s", "z"):
+        raise SystemExit(f"fm1.toml: unity_opt is \"s\" or \"z\", not {unity_opt!r}")
+    flags = [f"-O{unity_opt}" if f == "-Os" else f for f in flags]
     ir = CONF.get("ir_pass")                      # the app's pass over the IR (see the top)
     ir_out = ["-S", "-emit-llvm", "-Xclang", "-disable-llvm-optzns"] if ir else []
     units = [("cc", "-c", BSP / "chip" / "crt0.S", "-o", OUT / "crt0.o"),
@@ -638,7 +709,7 @@ def build_app():
             ir_pass(o.with_suffix(".ll"), o.with_suffix(".pass.ll"), str(f.relative_to(APP)))
         opt = [f for f in flags if not f.startswith(("-I", "-D", "-W"))]
         tc_all(("cc", *opt, "-c", OUT / "unity.pass.ll", "-o", OUT / "unity.o"),
-               *[("cc", *[f if f != "-Os" else "-O2" for f in opt], "-c", o.with_suffix(".pass.ll"), "-o", o)
+               *[("cc", *[f if f not in ("-Os", "-Oz") else "-O2" for f in opt], "-c", o.with_suffix(".pass.ll"), "-o", o)
                  for _, o in o2_units])
     elf = OUT / (NAME + ".elf")
     # unreferenced functions (each in its own section: -ffunction-sections) are dropped: the DSP keeps
@@ -668,6 +739,19 @@ def build_app():
     def symv(name):
         return int(re.search(r"^([0-9a-f]+) .*\s" + name + r"$", syms, re.M).group(1), 16)
     img = bytearray((OUT / "text.bin").read_bytes())
+    if CONF.get("boot_pack"):                     # boot_pack = true: .ram_text and .data stored LZMA-packed from _rt_load
+        global BOOT_PACKED                        # (tools/boot_pack.py, Melodee's), main_fm1.c unpacks them
+        raw = [(OUT / sect).read_bytes() if (OUT / sect).exists() else b"" for sect in boot_pack.SECTIONS]
+        load = symv("_rt_load")
+        if load % 4 or load - APP_XIP < len(img):
+            raise SystemExit(f"_rt_load {load:#x}: not word aligned, or over the image")
+        img += b"\xff" * (load - APP_XIP - len(img))
+        packed = boot_pack.pack_images(raw)
+        img += packed
+        BOOT_PACKED = (sum(map(len, raw)), len(packed))
+        img += b"\xff" * (-len(img) % 4)
+        (OUT / (NAME + ".bin")).write_bytes(img)
+        return bytes(img), syms, dis, rt
     # .ram_text and .data follow .text at their load addresses; crt0 copies them by words
     for sect, lname in (("ramtext.bin", "_rt_load"), ("data.bin", "_data_load")):
         load = symv(lname)
@@ -795,6 +879,9 @@ def check(img, syms, dis, rt):
     if os.environ.get("FM1B_POOL_SPARE", "").isdigit():   # an app's own build for itself (a demo build with mirror)
         spare = int(os.environ["FM1B_POOL_SPARE"])
     notes.append(f"image {len(img)} B; RAM .data+.bss {bss} B of {ram}; pool {pool} B of {pool_max}")
+    if BOOT_PACKED:                               # the boot decoder runs from the flash alone (tools/boot_pack.py)
+        errors += boot_pack.check_decoder(syms, dis, APP_XIP, APP_XIP + APP_SLOT)
+        notes.append(f"boot_pack: .ram_text + .data {BOOT_PACKED[0]} B stored as {BOOT_PACKED[1]} B (LZMA, unpacked at boot)")
     if bss > ram:
         errors.append("RAM region overflow")
     if pool_max - pool < spare:                   # keep some of the pool spare
@@ -892,7 +979,8 @@ def build_id():
 
 def opt_flags():
     """the optional parts an fm1.toml turns on that need no SDK: the same on the device, the host and the web"""
-    return [f"-D{flag}=1" for key, flag in (("mirror", "FM1B_MIRROR"), ("backup", "FM1B_BACKUP"), ("cpu2", "FM1B_CPU2"), ("usb_host", "FM1B_USB_HOST"))
+    return [f"-D{flag}=1" for key, flag in (("mirror", "FM1B_MIRROR"), ("backup", "FM1B_BACKUP"), ("cpu2", "FM1B_CPU2"), ("usb_host", "FM1B_USB_HOST"),
+                                                    ("resources", "FM1B_RES"))
             if (CONF.get(key) and os.environ.get(flag) != "0") or os.environ.get(flag) == "1"] + BOARD_DEFS   # (FM1B_MIRROR=1: a build with it, fm1.toml as it is; FM1B_BACKUP=0: without; the board's, SMK-37 only)
 
 
@@ -1174,6 +1262,10 @@ def main():
     pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image(img, fm1pkg_make.KEY), ota, PRODUCT)
     (OUT / name).write_bytes(pkg)
     print(f"app      {OUT / (NAME + '.bin')}  {len(img)} B")
+    if CONF.get("resources"):                 # the resource region beside the package: the installer writes it after
+        res = OUT / (Path(name).stem + "-res.bin")   # the firmware (fm1_install.py, the installer page)
+        res.write_bytes(res_file(res_payload()))
+        print(f"res      {res}  {res.stat().st_size} B (written after an update: tools/fm1_resources.py)")
     print(f"loader   {LDR / 'ota.bin'}  {len(ota)} B")
     print(f"package  {OUT / name}  {len(pkg)} B, identity {PRODUCT}")
     return 0
