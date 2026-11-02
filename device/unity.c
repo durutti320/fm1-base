@@ -330,6 +330,8 @@ static void rs_show(uint32_t pct);
 #if FM1B_RES
 #include "fm1_res.h"              /* FM1B_RES_LEN, FM1B_RES_CRC: the build's resources (build.py, from the file) */
 #include "res.c"                  /* the resource region (tools/fm1_resources.py) */
+#else
+const uint8_t *plat_res(uint32_t *len) { if (len) *len = 0u; return 0; }   /* (none: a build without resources) */
 #endif
 static void rs_show(uint32_t pct)
 {

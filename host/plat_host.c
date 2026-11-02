@@ -593,6 +593,8 @@ const uint8_t *plat_res(uint32_t *len)
         *len = res_there ? (uint32_t)sizeof fm1b_res_data : 0u;
     return res_there ? fm1b_res_data : 0;
 }
+#else
+const uint8_t *plat_res(uint32_t *len) { if (len) *len = 0u; return 0; }   /* (none: a build without resources) */
 #endif
 /* no host to pull from (an app's transfer is tested on its own, or by writing the flash: "data") */
 int plat_host_read(uint32_t addr, uint8_t *dst, uint32_t n) { (void)addr, (void)dst, (void)n; return -1; }
