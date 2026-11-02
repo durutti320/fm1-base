@@ -718,12 +718,13 @@ def build_app():
     lto = ["--plugin", "/opt/jieli/pi32v2/bin/LLVMgold.so" if use_docker() else str(toolchain() / "pi32v2/bin/LLVMgold.so"),
            f"--plugin-opt=mcpu={CPU}", "--plugin-opt=-pi32v2-large-program=true"] if jieli else []
     ld = SRC / "device" / ("app_wifi.ld" if WIFI else "app.ld")
-    if APP_SLOT != 0x8DFBC:                       # another board's app slot (the SMK-37): the same script, its XIP length
-        txt = ld.read_text()
-        if txt.count("LENGTH = 0x8DFBC") != 1:
-            raise SystemExit(f"{ld.name}: the XIP LENGTH line was not found")
+    if APP_SLOT != 0x8DFBC:                       # another board's app slot (the SMK-37): the same script, its slot: the
+        txt = ld.read_text()                      # XIP length (the slot and the 64 KB boot_pack frees) and the slot's end
+        if txt.count("LENGTH = 0x9DFBC") != 1 or txt.count("ORIGIN(XIP) + 0x8DFBC") != 1:
+            raise SystemExit(f"{ld.name}: the XIP LENGTH or _app_xip_end line was not found")
         ld = OUT / ld.name
-        ld.write_text(txt.replace("LENGTH = 0x8DFBC", f"LENGTH = {APP_SLOT:#x}"))
+        ld.write_text(txt.replace("LENGTH = 0x9DFBC", f"LENGTH = {APP_SLOT + 0x10000:#x}")
+                         .replace("ORIGIN(XIP) + 0x8DFBC", f"ORIGIN(XIP) + {APP_SLOT:#x}"))
     tc("pi32v2/bin/ld", *lto, "--gc-sections", "-e", "_start", "-T", ld, *objs, *b_objs,
        *b_libs, "-o", elf)
     for sect in ("text.bin", "data.bin", "ramtext.bin"):
