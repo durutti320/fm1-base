@@ -45,25 +45,43 @@ static void padled_flush(void)
 }
 
 /* the wheels (stock: mux C address 4 = pitch, 5 = mod), self-calibrating: the pitch wheel's rest is its centre
- * (taken at power-on, followed slowly while it rests), each wheel's range grows to what it has reached (the travel is
- * short: raw ~445..640 pitch, ~474..629 mod on a unit). Pitch: a 14-bit bend -8192..8191 with a dead band around the
- * centre; mod: 0..127, up (lower raw) = more. Main loop, every pass */
+ * (taken at power-on once the reading has stayed still, followed slowly while it rests), each wheel's range grows to
+ * what it has reached (the travel is short: raw ~445..640 pitch, ~474..629 mod on a unit). Pitch: a 14-bit bend
+ * -8192..8191 with a dead band around the centre; mod: 0..127, up (lower raw) = more. A centre taken wrong (a reading
+ * not yet settled, the wheel touched at power-on: on a unit the rest then bent a full fifth down and only the wheel
+ * held up played in tune) mends itself: the wheel left still for RECENTRE_MS near the middle of the travel it has
+ * really reached (within an eighth of it either side) is its rest; a bend held further out stays. Main loop, every pass */
 static volatile int16_t smk_bend14;
 static volatile uint8_t smk_modw;
 static void smk_wheels(void)
 {
-    enum { DEAD = 12, SPAN0 = 80, MOD_LO = 485, MOD_HI = 615 };
-    static int32_t pc, plo, phi, mlo, mhi, rest;
+    enum { DEAD = 12, SPAN0 = 80, MOD_LO = 485, MOD_HI = 615, STILL = 8, SETTLE_MS = 300, SETTLE_MAX_MS = 2000,
+           RECENTRE_MS = 3000 };
+    static int32_t pc, plo, phi, mlo, mhi, rest, sv, smin, smax;   /* smin, smax: the travel really reached */
+    static uint32_t st, t0;                       /* since when the pitch reading stays within STILL of sv; the first */
     int32_t p = fm1_in.wheel[0], m = fm1_in.wheel[1], d, b, mw;
+    uint32_t now = plat_ms();
     if (fm1_in.frames < 300u)                     /* (the readings settle) */
         return;
-    if (!pc) {
-        pc = p;
-        plo = p - SPAN0;
-        phi = p + SPAN0;
+    if (!t0)
+        t0 = now | 1u;
+    if (p - sv > STILL || sv - p > STILL) {       /* moved: still again from now */
+        sv = p;
+        st = now;
+    }
+    if (!pc) {                                    /* the centre: once the reading has been still (or after 2 s anyway) */
+        if (now - st < SETTLE_MS && now - t0 < SETTLE_MAX_MS)
+            return;
+        pc = now - st >= SETTLE_MS ? sv : p;
+        plo = pc - SPAN0;
+        phi = pc + SPAN0;
         mlo = m < MOD_LO ? m : MOD_LO;
         mhi = m > MOD_HI ? m : MOD_HI;
     }
+    if (!smax || p < smin)
+        smin = p;
+    if (p > smax)
+        smax = p;
     if (p < plo)
         plo = p;
     if (p > phi)
@@ -72,6 +90,13 @@ static void smk_wheels(void)
         mlo = m;
     if (m > mhi)
         mhi = m;
+    if (now - st >= RECENTRE_MS && (sv - pc > DEAD || pc - sv > DEAD) &&
+        smax - smin > 4 * SPAN0 / 3 && 8 * (sv - (smin + smax) / 2) < smax - smin &&
+        8 * ((smin + smax) / 2 - sv) < smax - smin) {
+        pc = sv;                                  /* still, off the centre, mid-travel: the rest; the range anew */
+        plo = pc - SPAN0;
+        phi = pc + SPAN0;
+    }
     d = p - pc;
     if (d > -DEAD && d < DEAD) {
         b = 0;
