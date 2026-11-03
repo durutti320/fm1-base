@@ -1204,6 +1204,8 @@ def main():
         STEM += "-smk37" + ("" if model == "pro" else "-" + model)
         if CONF.get("ble") or CONF.get("wifi"):
             raise SystemExit("BOARD=smk37: no radio yet (the SMK-37's Bluetooth pairing area is never written)")
+        BLE, OWN, WIFI = False, False, False      # (taken from fm1.toml's ble / wifi above, before smk37_ble: the SMK-37
+                                                  # build linked and started the FM-1's Bluetooth until 2026-11-03)
         for key in ("usb_product",):              # the USB name says the board ("LOOM-8 FM-1" -> "LOOM-8 SMK-37")
             if CONF.get(key):
                 CONF[key] = CONF[key].replace("FM-1", "SMK-37")
