@@ -56,7 +56,8 @@ def is_stock(product):
     """M-VAVE's FM-1 firmware, any version: FM-1_0 and two digits (FM-1_016; fm1-base's dev builds are FM-1_x00,
     its releases longer); m-bootloader's installer is FM-1_099.
     Whether a package is safe to write is the FM-1's to check (felucca-bsp chip/ota.c), not a list of files."""
-    return re.fullmatch(r"FM-1_0\d\d", product) is not None and product != "FM-1_099"
+    return (re.fullmatch(r"FM-1_0\d\d", product) is not None and product != "FM-1_099") or \
+        re.fullmatch(r"(SMK-37 Pro|SMK-37 Elite|MKE-P37)_0\d\d", product) is not None   # (the SMK-37's own: SMK-37 Pro_016)
 
 EXIT = {"usage": 2, "badpkg": 2, "notfound": 3, "model": 6, "open": 6, "lost": 4, "stopped": 4, "badreq": 4,
         "noloader": 5, "noreturn": 5, "mismatch": 6}
