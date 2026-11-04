@@ -176,8 +176,10 @@ __attribute__((used, visibility("default"))) void web_k1(int32_t n)
 }
 __attribute__((used, visibility("default"))) void web_key_vel(uint32_t k, uint32_t vel)
 {
-    if (k < NKEYS)
+    if (k < NKEYS) {
         hsmk_vel[k] = (uint8_t)(vel < 1u ? 1u : vel > 127u ? 127u : vel);
+        hsmk_last = (int)k + 5;              /* (the page sets a key's velocity as it presses it: plat_key_last) */
+    }
 }
 __attribute__((used, visibility("default"))) uint32_t *web_pad_rgb(void) { return hsmk_rgb; }
 __attribute__((used, visibility("default"))) uint32_t web_smk_lit(void) { return hsmk_lit; }

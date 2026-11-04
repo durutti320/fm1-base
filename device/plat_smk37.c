@@ -60,6 +60,16 @@ uint32_t plat_key_vel(int k)
     uint32_t v = k >= 0 && k < NKEYS ? fm1_in.key_vel[SMK_KEY_F3 + (uint32_t)k] : 0u;
     return v ? smk_vel_clamp(v) : 100u;
 }
+void plat_key_touch(int x) { smk_key_touch = (uint8_t)(x < 1 ? 1 : x > 15 ? 15 : x); }
+int plat_key_last(int *vel, int *dt)
+{
+    uint32_t k = fm1_in.last_key;
+    if (!k || k > FM1_NKEY)
+        return -1;
+    *vel = (int)smk_vel_clamp(fm1_in.last_vel);
+    *dt = (int)fm1_in.last_dt;
+    return (int)k - 1;
+}
 /* the pads: smk_input.h hands each hit and release here (SMK_PAD_EVENT, the 10 kHz scan), a ring for the main loop */
 #define SMK_PADQ 32u
 static volatile uint16_t smk_padq[SMK_PADQ];

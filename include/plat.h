@@ -65,6 +65,10 @@ enum { SB_KNOB_BANK, SB_FADER_BANK, SB_LEFT, SB_RIGHT, NSB };   /* its own four 
 uint32_t plat_smk_buttons(void);       /* held: bit SB_* */
 uint32_t plat_key_vel(int k);          /* key k's (0..NKEYS - 1) velocity at its last press, 1..127, from the unit's
                                         * own factory curves */
+void plat_key_touch(int x);            /* the keys' touch, 1..15: the stroke time the curves read counts 0.1 ms x this
+                                        * (1 the stock reading as analysed; more: a lighter touch, a stroke louder) */
+int plat_key_last(int *vel, int *dt);  /* the keybed key pressed last (0..36, C3..C6; -1 none yet): its velocity and its
+                                        * stroke, contact to contact, in 0.1 ms */
 int plat_pad(int *pad, int *vel);      /* the next pad hit (vel 1..127) or release (vel 0); 1 = got one */
 uint32_t plat_pads_held(void);         /* bit p: pad p held */
 int plat_outer(int *key, int *vel);    /* the next outer key (0..NOUTER - 1) press (vel 1..127) or release (0) */

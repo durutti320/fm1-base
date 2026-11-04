@@ -184,6 +184,17 @@ static uint16_t hsmk_padq[64], hsmk_outq[64];
 static uint32_t hsmk_padw, hsmk_padr, hsmk_outw, hsmk_outr;
 uint32_t plat_smk_buttons(void) { return hsmk_btn; }
 uint32_t plat_key_vel(int k) { return k >= 0 && k < NKEYS && hsmk_vel[k] ? hsmk_vel[k] : 100u; }
+static int hsmk_touch = 1, hsmk_last = -1;       /* plat_key_touch as set; the key pressed last (a script's key,
+                                                  * a middle one: keybed key 5 + k) */
+void plat_key_touch(int x) { hsmk_touch = x < 1 ? 1 : x > 15 ? 15 : x; }
+int plat_key_last(int *vel, int *dt)
+{
+    if (hsmk_last < 0)
+        return -1;
+    *vel = (int)plat_key_vel(hsmk_last - 5);
+    *dt = 0;                                     /* (no stroke here: the velocity is the script's) */
+    return hsmk_last;
+}
 int plat_pad(int *pad, int *vel)
 {
     if (hsmk_padr == hsmk_padw)
@@ -1419,6 +1430,10 @@ int main(int argc, char **argv)
                 held_keys |= 1u << k;
             else
                 held_keys &= ~(1u << k);
+#if BOARD_SMK37
+            if (down && k >= 0 && k < NKEYS)
+                hsmk_last = k + 5;                   /* (plat_key_last: a middle key, F3 = keybed key 5) */
+#endif
             if (cmd[0] == 't') {
                 run_ms(60);
 #ifdef APP_KEY_SENSE
