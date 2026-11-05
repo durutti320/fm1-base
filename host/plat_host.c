@@ -17,7 +17,8 @@
  *   turn ENC N [MS]              (ENC: SELECT ALGO PRESET K1 K2 K3 K4; N detents, MS apart, default 80)
  *   spin ENC N                   N detents at once, exactly N (no acceleration)
  *   master N                     MASTER pot 0..4096 (then 40 ms, as the device's smoothing settles)
- *   midi [PORT] B0 B1 B2         incoming MIDI message (PORT: USB, the default, BLE, BLE-DEV or TRS; hex bytes;
+ *   sysex USB2 F0 .. F7          an incoming SysEx on the second USB port (plat_midi2_in), as its packets
+ *   midi [PORT] B0 B1 B2         incoming MIDI message (PORT: USB, the default, USB2 the second port, BLE, BLE-DEV or TRS; hex bytes;
  *                                BLE is the computer's link, BLE-DEV the device's: both PORT_BLE, FM1B_BLE_CENTRAL)
  *   ble connect | ble link | ble disconnect   a central listening, or linked and not yet listening (FM1B_BLE: the
  *                                stand-in stack is ready a second after the start)
@@ -26,7 +27,7 @@
  *   shot FILE.png                save the screen
  *   leds                         print the lit buttons and keys (keys: # bright, + dim)
  *   out                          print the MIDI sent since the last "out" (and forget it; clocks not shown)
- *   expect_out PORT B0 B1 B2     check that this message went out to PORT since the last "out" (USB, BLE, BLE-DEV)
+ *   expect_out PORT B0 B1 B2     check that this message went out to PORT since the last "out" (USB, USB2, BLE, BLE-DEV)
  *   expect_no_out PORT B0 B1 B2  check that it did not
  *   expect WHAT VALUE            check state: exit 1 on mismatch; VALUE "<N" / ">N" is a bound
  *   reboot                       re-run boot from the simulated flash (persistence test)
@@ -294,6 +295,7 @@ uint32_t plat_analog_mask(void) { return 0xFFFFFu; }    /* the keys on rows PA7 
 
 #define MQ 256
 static uint32_t min_q[MQ], mi_w, mi_r;
+static uint32_t min2_q[MQ], mi2_w, mi2_r;      /* the second USB port's (the script's "midi USB2", "sysex USB2") */
 static FILE *midi_log;
 static uint32_t midi_out_count, clock_out_count;
 static uint32_t min_port[MQ];
@@ -315,7 +317,14 @@ static uint32_t ble_listening(void)            /* the Bluetooth links listening,
 /* the host's MIDI out is logged at once and never fills: the device's whole ring free, for whoever listens */
 uint32_t plat_midi_out_room(uint32_t to)
 {
-    return to & (TO_USB | ble_listening()) ? 64u : 0u;
+    return to & (TO_USB | TO_USB2 | ble_listening()) ? 64u : 0u;
+}
+int plat_midi2_in(uint32_t *pkt)
+{
+    if (mi2_r == mi2_w)
+        return 0;
+    *pkt = min2_q[mi2_r++ % MQ] & ~0xF0u;
+    return 1;
 }
 static uint32_t usb_links;                      /* plat_midi_out_link: one USB connection, all run long */
 uint32_t plat_midi_out_link(void) { return usb_links; }
@@ -343,7 +352,7 @@ int plat_midi_in(uint32_t *pkt, int *port)       /* the script's "midi" (BLE-DEV
 }
 void plat_midi_send(uint32_t pkt, uint32_t to)
 {
-    to &= TO_USB | ble_listening();               /* as the device: nothing queues for a link not there */
+    to &= TO_USB | TO_USB2 | ble_listening();     /* as the device: nothing queues for a link not there */
     if (!to)
         return;
     if (to & TO_USB)
@@ -360,9 +369,9 @@ void plat_midi_send(uint32_t pkt, uint32_t to)
         return;
     }
     if (midi_log)
-        fprintf(midi_log, "%u ms: %02X %02X %02X ->%s%s%s\n", now_ms, (pkt >> 8) & 0xFF, (pkt >> 16) & 0xFF,
-                (pkt >> 24) & 0xFF, to & TO_USB ? " USB" : "", to & TO_BLE_HOST ? " BLE" : "",
-                to & TO_BLE_DEV ? " BLE-DEV" : "");
+        fprintf(midi_log, "%u ms: %02X %02X %02X ->%s%s%s%s\n", now_ms, (pkt >> 8) & 0xFF, (pkt >> 16) & 0xFF,
+                (pkt >> 24) & 0xFF, to & TO_USB ? " USB" : "", to & TO_USB2 ? " USB2" : "",
+                to & TO_BLE_HOST ? " BLE" : "", to & TO_BLE_DEV ? " BLE-DEV" : "");
 }
 
 /* the USB MIDI host: the simulator has no USB port */
@@ -1176,7 +1185,7 @@ static const char *const PORT_N[NPORTS] = {"USB", "BLE", "TRS"};
 static int expect_out(const char *port, uint32_t pkt, int sent)
 {
     int p = find_name(PORT_N, NPORTS, port);
-    uint32_t to = !strcmp(port, "BLE-DEV") ? TO_BLE_DEV : p >= 0 ? 1u << p : 0u, i;
+    uint32_t to = !strcmp(port, "BLE-DEV") ? TO_BLE_DEV : !strcmp(port, "USB2") ? TO_USB2 : p >= 0 ? 1u << p : 0u, i;
     for (i = 0; i < n_out; i++)
         if (((out_pkt[i] ^ pkt) & 0xFFFFFF00u) == 0 && (out_to[i] & to))
             break;
@@ -1478,6 +1487,27 @@ int main(int argc, char **argv)
         } else if (!strcmp(cmd, "master")) {
             master = (uint32_t)atoi(a);
             run_ms(40);                         /* as the device's smoothing settles */
+        } else if ((!strcmp(cmd, "midi") || !strcmp(cmd, "sysex")) && !strcmp(a, "USB2")) {
+            /* the second USB port: "midi USB2 B0 B1 B2" one message, "sysex USB2 F0 .. F7" a SysEx as its packets */
+            if (cmd[0] == 'm')
+                min2_q[mi2_w++ % MQ] = mk_pkt(b, c, d);
+            else {
+                const char *q = strstr(line, "USB2") + 4;
+                uint8_t by[3];
+                uint32_t k = 0, v;
+                int used;
+                while (sscanf(q, " %2x%n", &v, &used) == 1) {
+                    q += used;
+                    by[k++] = (uint8_t)v;
+                    if (k == 3u || v == 0xF7u) {
+                        uint32_t cin = v == 0xF7u ? 4u + k : 4u;   /* 4 goes on; 5, 6, 7 end with 1, 2, 3 bytes */
+                        min2_q[mi2_w++ % MQ] = cin | (uint32_t)by[0] << 8 | (k > 1u ? (uint32_t)by[1] << 16 : 0u) |
+                                               (k > 2u ? (uint32_t)by[2] << 24 : 0u);
+                        k = 0;
+                    }
+                }
+            }
+            run_ms(2);
         } else if (!strcmp(cmd, "midi")) {
             int dev = !strcmp(a, "BLE-DEV"), p = dev ? PORT_BLE : find_name(PORT_N, NPORTS, a);
             min_q[mi_w % MQ] = p < 0 ? mk_pkt(a, b, c) : mk_pkt(b, c, d) | (dev ? 0x10u : 0u);   /* cable 1 */
@@ -1502,9 +1532,9 @@ int main(int argc, char **argv)
             uint32_t i;
             for (i = 0; i < n_out; i++)
                 if (((out_pkt[i] >> 8) & 0xFF) != 0xF8)
-                    printf("  out %02X %02X %02X ->%s%s%s\n", (out_pkt[i] >> 8) & 0xFF, (out_pkt[i] >> 16) & 0xFF,
-                           out_pkt[i] >> 24, out_to[i] & TO_USB ? " USB" : "", out_to[i] & TO_BLE_HOST ? " BLE" : "",
-                           out_to[i] & TO_BLE_DEV ? " BLE-DEV" : "");
+                    printf("  out %02X %02X %02X ->%s%s%s%s\n", (out_pkt[i] >> 8) & 0xFF, (out_pkt[i] >> 16) & 0xFF,
+                           out_pkt[i] >> 24, out_to[i] & TO_USB ? " USB" : "", out_to[i] & TO_USB2 ? " USB2" : "",
+                           out_to[i] & TO_BLE_HOST ? " BLE" : "", out_to[i] & TO_BLE_DEV ? " BLE-DEV" : "");
             n_out = 0;
         } else if (!strcmp(cmd, "expect_out") || !strcmp(cmd, "expect_no_out")) {
             fails += expect_out(a, mk_pkt(b, c, d), !strcmp(cmd, "expect_out"));

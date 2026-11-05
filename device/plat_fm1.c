@@ -246,7 +246,7 @@ uint32_t plat_midi_ago(int port, int out)
 uint32_t plat_midi_out_room(uint32_t to)
 {
     uint32_t room = 0xFFFFFFFFu, r;
-    if ((to & TO_USB) && (r = midi_out_room()) && r < room)
+    if ((to & (TO_USB | TO_USB2)) && (r = midi_out_room()) && r < room)   /* (both ports: one ring) */
         room = r;
     if ((to & TO_BLE) && (r = ble_midi_out_room(to)) && r < room)
         room = r;
@@ -284,6 +284,10 @@ void plat_midi_send(uint32_t pkt, uint32_t to)    /* the main loop's and the tic
         midi_out_event(pkt);
         midi_counted(PORT_USB, 1, pkt);
     }
+#if FELUCCA_USB_MIDI_PORTS > 1
+    if (to & TO_USB2)
+        midi_out_event((pkt & ~0xF0u) | 0x10u);   /* cable 1 (not counted: the MIDI lights are the music's) */
+#endif
     if (to & TO_BLE) {
         ble_midi_tap(pkt, to);
         midi_counted(PORT_BLE, 1, pkt);
@@ -292,6 +296,11 @@ void plat_midi_send(uint32_t pkt, uint32_t to)    /* the main loop's and the tic
         plat_unlock(f);
 }
 void plat_midi_out(uint32_t pkt) { plat_midi_send(pkt, TO_USB); }
+#if FELUCCA_USB_MIDI_PORTS > 1
+int plat_midi2_in(uint32_t *pkt) { return midi_in2_take(pkt); }
+#else
+int plat_midi2_in(uint32_t *pkt) { (void)pkt; return 0; }
+#endif
 
 #if FELUCCA_USB_HOST                              /* (felucca-bsp's UH_MSG_* are USBH_MSG_*, in order) */
 void plat_usb_host(int on) { usb_host_switch((uint32_t)(on != 0)); }

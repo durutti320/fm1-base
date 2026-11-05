@@ -122,8 +122,14 @@ __attribute__((used, visibility("default"))) void web_midi_in(uint32_t port, uin
         min_port[mi_w++ % MQ] = port;
     }
 }
+__attribute__((used, visibility("default"))) void web_midi2_in(uint32_t pkt)   /* the second USB port's (plat_midi2_in) */
+{
+    if (mi2_w - mi2_r < MQ)
+        min2_q[mi2_w++ % MQ] = pkt;
+}
 __attribute__((used, visibility("default"))) uint32_t web_out_n(void) { return n_out; }
 __attribute__((used, visibility("default"))) uint32_t *web_out_pkts(void) { return out_pkt; }
+__attribute__((used, visibility("default"))) uint32_t *web_out_to(void) { return out_to; }   /* each one's TO_* */
 __attribute__((used, visibility("default"))) void web_out_clear(void) { n_out = 0; }
 __attribute__((used, visibility("default"))) uint16_t *web_fb(void) { return fb; }
 __attribute__((used, visibility("default"))) uint32_t web_blits(void) { return blits; }

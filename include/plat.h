@@ -108,6 +108,13 @@ uint32_t plat_midi_out_room(uint32_t to);   /* the free slots in the out queues 
                                         * note-on */
 uint32_t plat_midi_out_link(void);     /* a number that changes at each new USB connection (a host to tell its
                                         * sounds again: programs, volumes) */
+/* the second USB MIDI port (fm1.toml usb_midi_ports = 2: felucca-bsp FELUCCA_USB_MIDI_PORTS): a port of its own for
+ * a DAW's control surface beside the music. Its packets never reach plat_midi_in: plat_midi2_in hands them over as
+ * they came (the cable cleared; SysEx as its packets), main loop only. Nothing waits for them: not read soon, they are
+ * lost (the device's ring holds 256). TO_USB2 in plat_midi_send (and plat_midi_out_room): out on it. One port: none
+ * come in, nothing goes out */
+#define TO_USB2 (1u << 4)
+int plat_midi2_in(uint32_t *pkt);      /* 1 = got one */
 /* USB MIDI host (fm1.toml usb_host = true: FM1B_USB_HOST 1; felucca-bsp docs/USB_HOST.md): the USB port plays host to
  * a USB-MIDI controller or synth, directly or behind one powered hub; the FM-1 gives the port no power (a powered hub
  * or adapter). It comes in on PORT_USB and TO_USB goes to it; no computer meanwhile (no USB audio, backup, mirror).

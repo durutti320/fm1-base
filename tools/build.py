@@ -59,6 +59,9 @@ APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
                              2: MIDI left out of the collection too (a test build: no USB MIDI on Linux)
   usb_iad = true             without the USB console, an interface association descriptor over the audio function, the
                              device then misc / IAD (felucca-bsp FELUCCA_UAC_IAD; the default: false); bcdDevice +2.00
+  usb_midi_ports = 2         a second USB MIDI port beside the first, for a DAW's control surface (felucca-bsp
+                             FELUCCA_USB_MIDI_PORTS; plat.h plat_midi2_in, TO_USB2; the default: 1); bcdDevice +10.00
+  usb_midi_name2 = "..."     its name, where the computer shows the jacks' (macOS, Linux; Windows: MIDIIN2 (product))
   usb_host = true            the USB port as a MIDI host when the app asks (FM1B_USB_HOST: felucca-bsp's
                              FELUCCA_USB_HOST, docs/USB_HOST.md; plat_usb_host in plat.h): a USB-MIDI controller or
                              synth, directly or behind one powered hub (the FM-1 gives no power). Boot is a device
@@ -652,6 +655,12 @@ def build_app():
     flags.append(f"-DFELUCCA_UAC_MIDI_LAST={int(midi_last)}")
     if CONF.get("usb_iad"):
         flags.append("-DFELUCCA_UAC_IAD=1")
+    ports = CONF.get("usb_midi_ports", 1)
+    if ports not in (1, 2):
+        raise SystemExit(f"fm1.toml: usb_midi_ports is 1 or 2, not {ports!r}")
+    flags.append(f"-DFELUCCA_USB_MIDI_PORTS={ports}")
+    if ports == 2 and CONF.get("usb_midi_name2"):
+        flags.append(f'-DFELUCCA_USB_MIDI_NAME2="{CONF["usb_midi_name2"]}"')
     for flag in ("FM1B_CDC", "FM1B_UAC", "FM1B_UAC_OUT", "FM1B_TRS"):
         v = os.environ.get(flag)    # unset: fm1.toml's, the app's (app.h) or the platform's default (device/unity.c)
         if v in ("0", "1"):
@@ -1258,6 +1267,7 @@ def main():
              ("USB audio out", on("usb_audio_out", "FM1B_UAC_OUT", True) and on("usb_audio_in", "FM1B_UAC", True)),
              ("screen mirroring", bool(CONF.get("mirror")) or os.environ.get("FM1B_MIRROR") == "1"), ("backup and restore", bool(CONF.get("backup")) and os.environ.get("FM1B_BACKUP") != "0"),
              ("the second core", CPU2), ("USB MIDI host", on("usb_host", "FM1B_USB_HOST", False)),
+             ("a second USB MIDI port", CONF.get("usb_midi_ports", 1) == 2),
              ("velocity and pressure", any(re.search(r"^#define APP_TOUCH\b", f.read_text(errors="ignore"), re.M)
                                             for f in APP.glob("*.h")))]
     print("parts    " + ", ".join(n for n, x in parts if x) + "  (not built in: " +
