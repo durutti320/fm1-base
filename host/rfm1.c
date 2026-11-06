@@ -99,7 +99,7 @@ static rf_panel_t rf_panel;
 static uint8_t rf_image[RF_FLASH_SIZE];
 
 #define PLAT_FB (rf_panel.lcd)                                  /* the app draws straight into the panel */
-#define PLAT_DATA_AREA (&rf_image[PLAT_XDATA0_LO])              /* plat_data reads the image in place */
+#define PLAT_DATA_AREA (&rf_image[PLAT_DATA_LO < PLAT_XDATA0_LO ? PLAT_DATA_LO : PLAT_XDATA0_LO])   /* plat_data reads the image in place (from plat_host.c's DATA_BASE) */
 static void web_audio(const int32_t *blk, uint32_t n) { (void)blk, (void)n; }   /* (run_ms's; not used here) */
 #include "plat_host.c"
 

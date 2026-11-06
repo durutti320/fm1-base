@@ -137,7 +137,8 @@ void plat_pad_flush(void) { padled_flush(); }   /* (smk37_io.c: between screen t
  * its end marker "usrdata" (0xEAFF8) is there: its sector is erased once, before the first erase or write into
  * PLAT_XDATA0, so a return to stock rebuilds its factory mapping instead of reading the app's data as its own */
 _Static_assert(FL_DATA_LO == PLAT_DATA_LO && FL_DATA_HI == PLAT_DATA_HI && FL_XDATA0_LO == PLAT_XDATA0_LO &&
-               FL_XDATA0_HI == PLAT_XDATA0_HI && PLAT_XDATA1_LO == PLAT_XDATA1_HI, "plat.h's windows are felucca-bsp's");
+               FL_XDATA0_HI == PLAT_XDATA0_HI && FL_XDATA1_LO == PLAT_XDATA1_LO && FL_XDATA1_HI == PLAT_XDATA1_HI,
+               "plat.h's windows are felucca-bsp's");
 static void smk_stock_release(uint32_t off)
 {
     static const uint8_t TAG[8] = {'u', 's', 'r', 'd', 'a', 't', 'a', 0};

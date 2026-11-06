@@ -561,20 +561,24 @@ const char *plat_ble_log_line(int back)
 }
 void plat_midi_out(uint32_t pkt) { plat_midi_send(pkt, TO_USB); }
 void plat_log(const char *line) { ble_say(line); }
-/* the data area and its two more windows (plat.h): a simulated flash from the first window to the last (the gap
- * between, the update's staging, refused as on the device), erased at the start, kept across a simulated reboot */
-#define DATA_BASE PLAT_XDATA0_LO
+/* the data area and its two more windows (plat.h): a simulated flash from the lowest window to the top of the highest
+ * (the gaps between, the update's staging, refused as on the device), erased at the start, kept across a simulated
+ * reboot. The FM-1: PLAT_XDATA0 lowest, PLAT_XDATA1 highest; the SMK-37: the data area lowest */
+#define DATA_MIN2(a, b) ((a) < (b) ? (a) : (b))
+#define DATA_MAX2(a, b) ((a) > (b) ? (a) : (b))
+#define DATA_BASE DATA_MIN2(PLAT_DATA_LO, PLAT_XDATA0_LO)
+#define DATA_TOP DATA_MAX2(DATA_MAX2(PLAT_DATA_HI, PLAT_XDATA0_HI), PLAT_XDATA1_HI)
 #ifdef PLAT_DATA_AREA
 static uint8_t *const data_area = PLAT_DATA_AREA;   /* the embedder's own (host/rfm1.c: in its flash image) */
 #else
-static uint8_t data_area[PLAT_XDATA1_HI - DATA_BASE];
+static uint8_t data_area[DATA_TOP - DATA_BASE];
 #endif
 static uint8_t data_ready;
 static uint32_t data_writes;            /* every erase and write */
 static void data_init(void)
 {
     if (!data_ready) {
-        memset(data_area, 0xFF, PLAT_XDATA1_HI - DATA_BASE);
+        memset(data_area, 0xFF, DATA_TOP - DATA_BASE);
         data_ready = 1;
     }
 }

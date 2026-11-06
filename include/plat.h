@@ -230,13 +230,15 @@ void plat_log(const char *line);
  * bank that has it) */
 #if BOARD_SMK37
 /* the SMK-37 (felucca-bsp chip/fm1_flash_smk37.h): the store in the stock VM 0x9D000..0xBAFFF (120 KiB), the big data
- * in USRFLASH 0xC2000..0xE9FFF (160 KiB), no second window. Never the unit's calibration (0xC0000..0xC1FFF) */
+ * in USRFLASH 0xC2000..0xE9FFF (160 KiB) and the gap the stock layout leaves after it, 0xEB000..0xF3FFF (36 KiB: in no
+ * region of the stock package). Never the unit's calibration (0xC0000..0xC1FFF), never the stock end marker's sector
+ * 0xEA000 between them (the platform's own: plat_smk37.c), never the stock resources above (0xF4000..) */
 #define PLAT_DATA_LO 0x9D000u
 #define PLAT_DATA_HI 0xBB000u
 #define PLAT_XDATA0_LO 0xC2000u
 #define PLAT_XDATA0_HI 0xEA000u
-#define PLAT_XDATA1_LO 0xEA000u                /* (empty) */
-#define PLAT_XDATA1_HI 0xEA000u
+#define PLAT_XDATA1_LO 0xEB000u
+#define PLAT_XDATA1_HI 0xF4000u
 #else
 #define PLAT_DATA_LO 0x97000u
 #define PLAT_DATA_HI 0xE0000u
