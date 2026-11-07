@@ -47,6 +47,9 @@ APP_DIR holds the app (app.h, app.c, its sources) and its fm1.toml:
   ble_central = true         and the FM-1 connects to Bluetooth MIDI devices too (FM1B_BLE_CENTRAL), beside a computer
   usb_audio_in = true        the FM-1 recordable over USB (FM1B_UAC; the default: true)
   usb_audio_out = true       a computer plays through the FM-1 over USB (FM1B_UAC_OUT; the default: true)
+  usb_audio_48k = false      the USB audio input at 44.1 kHz only (felucca-bsp FELUCCA_UAC_48K; the default: true, 48 kHz
+                             offered too, resampled on the device: a busy app's render may not keep up, and a computer
+                             at 48 kHz then resamples on its side instead)
   usb_audio_first = true     the USB audio streaming interfaces listed first in the audio control collection
                              (felucca-bsp FELUCCA_UAC_AS_FIRST, from Felucca 1.5.1): macOS then shows the FM-1 as an audio
                              device beside its MIDI; bcdDevice +0.08 (a changed device to the computer). Not enough
@@ -649,6 +652,8 @@ def build_app():
             flags.append(f"-D{flag}={int(bool(CONF[key]))}")
     if CONF.get("usb_audio_first"):
         flags.append("-DFELUCCA_UAC_AS_FIRST=1")
+    if "usb_audio_48k" in CONF:                    # (felucca-bsp FELUCCA_UAC_48K: its default, 48 kHz offered too)
+        flags.append(f"-DFELUCCA_UAC_48K={int(bool(CONF['usb_audio_48k']))}")
     midi_last = CONF.get("usb_midi_last", True)   # (the bsp leaves it out without the USB audio input)
     if midi_last not in (True, False, 0, 1, 2):
         raise SystemExit(f"fm1.toml: usb_midi_last is true, false or 2, not {midi_last!r}")
