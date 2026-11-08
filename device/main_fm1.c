@@ -427,6 +427,46 @@ static int log_frame(const uint8_t *p, uint32_t n)
         log_line_send(b);
         t5_gap_max = t5_late = t5_run_max = lock_max = 0;
     }
+#if FELUCCA_UAC
+    {   /* the USB audio input since the last read: ms, packets and frames sent (44.1 a ms when the host takes one
+         * packet a frame), renders dropped (ring full), packets repeated (ring empty), IN tokens that found nothing
+         * queued; steering up / down, stalls; the fill's range (this stream), renders, renders late */
+        static uint32_t last[12];
+        const uint32_t now[12] = {fm1_ms, uac.pkts, uac.frames, uac.overruns, uac.underruns, uac.missed,
+                                  uac.adj_up, uac.adj_down, uac.stalls, 0, fm1b_dbg.halves, fm1b_dbg.late};
+        static const char *const L[12] = {"ua ms ", " pk ", " fr ", "drop ", " rep ", " miss ",
+                                          "up ", " dn ", " st ", "fill ", " ren ", " late "};
+        uint32_t i;
+        for (i = 0; i < 12u; i++) {
+            const char *l = L[i];
+            uint32_t v = i == 9u ? uac.fill_lo : now[i] - last[i], d = 0;
+            char t[10];
+            if (i % 3u == 0u)
+                q = b;
+            while (*l)
+                *q++ = *l++;
+            do {
+                t[d++] = (char)('0' + v % 10u);
+                v /= 10u;
+            } while (v);
+            while (d)
+                *q++ = t[--d];
+            if (i == 9u) {                           /* the fill: lo..hi */
+                *q++ = '.';
+                *q++ = '.';
+                for (v = uac.fill_hi, d = 0; d == 0u || v; v /= 10u)
+                    t[d++] = (char)('0' + v % 10u);
+                while (d)
+                    *q++ = t[--d];
+            }
+            if (i % 3u == 2u) {
+                *q = 0;
+                log_line_send(b);
+            }
+            last[i] = now[i];
+        }
+    }
+#endif
 #if FM1B_BLE
     {
         extern uint32_t shim_off_max, shim_off_from;
