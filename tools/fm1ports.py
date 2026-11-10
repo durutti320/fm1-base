@@ -19,8 +19,8 @@ import time
 from collections import namedtuple
 
 # port names taken without asking (any case, part of the name): fm1ports.js PORT_NAMES. Never probe other gear
-PORT_RE = re.compile(r"fm-?1|smk|elite|mke-p37|starry|felucca|ota|composite|sinco|usb-midi", re.I)   # (smk|elite|mke-p37|starry: the
-# M-VAVE SMK-37 under its model names, BOARD_SMK37)
+PORT_RE = re.compile(r"fm-?1|smk|elite|mke-p37|starry|felucca|ota|composite|sinco|usb-midi|optimist|sloop|melodee|loom-?8|spider", re.I)   # (smk|elite|mke-p37|starry: the
+# M-VAVE SMK-37 under its model names, BOARD_SMK37; then the names FM-1 firmwares give their own port)
 SR = (0x7D, 0x53, 0x52)
 HELLO = bytes([*SR, 1, 1])                 # as mido has a SysEx: without F0 and F7
 TRIES, TIMEOUT = 3, 0.5

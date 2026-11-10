@@ -9,14 +9,31 @@
 // Step 1: the running firmware reads parts of the package and stages the update
 // loader. Step 2: the loader reads the whole image and writes it. In both steps
 // the device sends cmd 0x30 read requests on the logical image and we answer.
+// Step 2 is the fast install when the loader can (felucca-bsp loader/ldr_core.c, LDR_FAST_CHUNK): before the upgrade
+// command we say cmd 0x31 [1, 4096]; a loader that answers it within 0.5 s reads a table of flash.bin's 4 KiB sectors
+// (CRC16, CRC-32) at 0xD0000000 + flash.bin's offset, checks it against the package before anything is erased, and asks
+// only for the sectors that differ, 4 KiB at a time (a cut-off install resumes: what was written is skipped); it says
+// how far it compared with cmd 0x32 [sectors compared, all]. A loader that says nothing gets the classic protocol,
+// unchanged; a package without a Felucca loader (M-VAVE's firmware: M-VAVE's loader) never hears the hello.
 
 import { PORT_NAMES, usualName, livePorts, outputFor, pairs, askAll } from "./fm1ports.js";
 
 const HS_QUERY = [0xF0, 0x00, 0x32, 0x45, 0x00, 0x00, 0x00, 0x40, 0x7F, 0xF7];
+// the handshake with the one-byte body 01 (00 59 11, length 1, 01, checksum FE): a firmware on felucca-bsp's chip/ota.c
+// answers HS_QUERY with its name, '_' and three digits only ("FM-1_601": M-UPGRADE 3.11 refuses more) and this one with
+// its whole identity ("FM-1_6010000"). M-VAVE's firmware, the update loaders and older builds don't answer it.
+// (PERF-1's scheme: its installers and ours ask the same way)
+export const HS_FULL = [0xF0, 0x00, 0x32, 0x45, 0x08, 0x00, 0x00, 0x40, 0x00, 0x7E, 0x01, 0xF7];
 const UPGRADE = [0xF0, 0x22, 0x24, 0x35, 0x7F, 0xF7];
 const MAXDATA = 512;
+const FAST_CMD = 0x31, CHECK_CMD = 0x32, FAST_CHUNK = 4096, TABLE = 0xD0000000, TABLE_END = 0xE0000000;
+const LOADER_MARK = [..."FELUCCA-LOADER-1"].map((c) => c.charCodeAt(0));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const IS_OTA = (id) => /^ota-/i.test(id.model);
+
+// an FM-1 paired over Bluetooth MIDI shows a port named "... Bluetooth" beside its USB one: it never answers an update
+// (and a Mac lists the paired one first), so no port with that word is asked, picked, listed or tried
+export const IS_BLUETOOTH = (name) => /bluetooth/i.test(name || "");
 
 // M-VAVE's FM1 Open firmware (V10, 2026-10): its updater takes only a package it has been told about
 // first (cmd 49 reads its state, cmd 50 arms it with the image length and the package's SHA-256); then
@@ -34,8 +51,13 @@ const OPEN_LOADER_RE = /^ota-FM1C_[0-9a-f]+$/;
 // (felucca-bsp chip/ota.c: a well-made writer, a bootable boot area), not a list of known files
 const IS_STOCK = (product) => /^FM-1_0\d\d$/.test(product) && product !== "FM-1_099";
 
+// the update loader of M-VAVE's own firmware: the stock one ("ota-FM-1_0" and two digits) and the Open firmware's (OPEN_LOADER_RE).
+// Their layout of the image may differ from the one this package was made for, so a device found waiting in one of them is
+// written only a package of M-VAVE's own firmware (IS_STOCK: the return to the stock firmware), never another firmware's
+export const IS_MVAVE_LOADER = (id) => /^ota-FM-1_0\d\d$/i.test(id.text) || OPEN_LOADER_RE.test(id.text);
+
 // errors carry a code the pages translate: notfound, model, stopped, noloader, lost, noreturn,
-// mismatch (detail: the identity the device reports), badreq
+// mismatch (detail: the identity the device reports), badreq, foreign (detail: the loader's identity)
 function fail(code, msg, detail = "") { const e = new Error(msg); e.code = code; e.detail = detail; return e; }
 
 export function pack7(data) {
@@ -81,7 +103,8 @@ function parseRequest(pkt) {
 function parseIdentity(pkt) {
   const d = unpack7(pkt.slice(1, -1));
   if (d.length !== 34 || d[0] !== 0 || d[1] !== 0x59 || d[2] !== 0x11) return null;
-  const txt = String.fromCharCode(...d.slice(6, 33)).replace(/\0+$/, "");
+  const z = d.indexOf(0, 6);                     // the text up to its first zero (bytes after it may carry data)
+  const txt = String.fromCharCode(...d.slice(6, z < 0 || z > 33 ? 33 : z));
   if (OPEN_RE.test(txt)) return { text: txt, model: "FM-1", version: 0, open: true };
   if (OPEN_LOADER_RE.test(txt)) return { text: txt, model: "ota-FM1C", version: 0, open: true };
   const m = /^([^_]+)_(\d+)$/.exec(txt);
@@ -144,17 +167,30 @@ class Link {
   close() { this.input.onmidimessage = null; }
 }
 
+// send a handshake -> the identity answered, null (no answer in ms), false (the send failed)
+async function ask(link, query, ms) {
+  if (!link.send(query)) return false;
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const p = await link.read(end - Date.now());
+    if (!p) break;
+    const id = parseIdentity(p);
+    if (id) return id;
+  }
+  return null;
+}
+
+// the identity: HS_QUERY, then HS_FULL when the answer is NAME_ and three digits (a firmware on chip/ota.c tells its
+// whole identity so); the plain answer when nothing answers HS_FULL (M-VAVE's, an older build)
 async function handshake(link, tries = 3) {
   link.drain();
   for (let t = 0; t < tries; t++) {
-    if (!link.send(HS_QUERY)) return null;
-    const end = Date.now() + 1000;
-    while (Date.now() < end) {
-      const p = await link.read(end - Date.now());
-      if (!p) break;
-      const id = parseIdentity(p);
-      if (id) return id;
-    }
+    const id = await ask(link, HS_QUERY, 1000);
+    if (id === false) return null;
+    if (id === null) continue;
+    if (IS_OTA(id) || !/^[^_]+_\d{3}$/.test(id.text)) return id;
+    const full = await ask(link, HS_FULL, 600);
+    return full && full.model === id.model && full.text.startsWith(id.text) ? full : id;
   }
   return null;
 }
@@ -163,6 +199,66 @@ function frame(cmd, payload = []) {
   let s = 0;
   for (const b of payload) s += b;
   return [0xF0, ...pack7([0x00, 0x59, cmd, payload.length & 0xFF, payload.length >> 8, 0, ...payload, ~s & 0xFF]), 0xF7];
+}
+
+export const FAST_HELLO = frame(FAST_CMD, [1, FAST_CHUNK & 0xFF, FAST_CHUNK >> 8]);
+
+// any frame in the update protocol's framing, its checksum checked -> {cmd, body}, or null
+export function parseFrame(pkt) {
+  if (pkt[0] !== 0xF0 || pkt[pkt.length - 1] !== 0xF7) return null;
+  const u = unpack7(pkt.slice(1, -1));
+  if (u.length < 7 || u[0] !== 0 || u[1] !== 0x59) return null;
+  const n = u[3] | (u[4] << 8) | (u[5] << 16);
+  if (u.length !== 7 + n) return null;
+  let s = 0;
+  for (let i = 6; i < 6 + n; i++) s += u[i];
+  return (~s & 0xFF) === u[6 + n] ? { cmd: u[2], body: u.slice(6, 6 + n) } : null;
+}
+
+// the UFW's CRC16 (XMODEM: poly 0x1021, init 0), as felucca-bsp chip/ota.c ota_crc16
+const UFW_CRC16_T = (() => {
+  const t = new Uint16Array(256);
+  for (let n = 0; n < 256; n++) { let c = n << 8; for (let k = 0; k < 8; k++) c = c & 0x8000 ? (c << 1) ^ 0x1021 : c << 1; t[n] = c & 0xFFFF; }
+  return t;
+})();
+export function ufwCrc16(d, c = 0) {   // (not crc16: fm1pkg.js has one, and the installer page inlines both)
+  for (let i = 0; i < d.length; i++) c = (UFW_CRC16_T[((c >> 8) ^ d[i]) & 0xFF] ^ (c << 8)) & 0xFFFF;
+  return c;
+}
+
+// the fast install's table: n entries, one per 4 KiB sector of the image from off: [CRC16, CRC-32] little-endian
+export function sectorTable(image, off, n) {
+  const t = [];
+  for (let k = 0; k < n; k++) {
+    const sec = image.subarray(off + k * FAST_CHUNK, off + (k + 1) * FAST_CHUNK), c = ufwCrc16(sec);
+    t.push(c & 0xFF, c >> 8, ...le32(crc32(sec)));
+  }
+  return t;
+}
+
+// the package brings a Felucca update loader (its marker): only that loader hears the fast install's hello
+export function hasLoader(image) {
+  outer: for (let i = image.indexOf(LOADER_MARK[0]); i >= 0 && i + LOADER_MARK.length <= image.length;
+    i = image.indexOf(LOADER_MARK[0], i + 1)) {
+    for (let k = 1; k < LOADER_MARK.length; k++) if (image[i + k] !== LOADER_MARK[k]) continue outer;
+    return true;
+  }
+  return false;
+}
+
+// the fast install's word: true when the loader answers it within 0.5 s (it holds for the next session); an older
+// loader, or one still in a fast session it kept (it asks 4 KiB all the same: serve takes them), says nothing
+async function fastHello(link) {
+  link.drain();
+  if (!link.send(FAST_HELLO)) return false;
+  const end = Date.now() + 500;
+  while (Date.now() < end) {
+    const p = await link.read(end - Date.now());
+    if (!p) break;
+    const f = parseFrame(p);
+    if (f && f.cmd === FAST_CMD && f.body.length === 3 && f.body[0] === 1 && (f.body[1] | (f.body[2] << 8)) >= FAST_CHUNK) return true;
+  }
+  return false;
 }
 
 // send a command -> the payload of its reply, or null
@@ -191,6 +287,8 @@ export class Updater {
     this.allowed = new Set();               // ports the user picked although their names are none of the usual ones
     this.baseline = null;                   // the ports when an update started (watch)
     this.answered = new Set();              // ports found by answering() (a page may remember them, as the user's picks)
+    this.classic = false;                   // never the fast install (write)
+    this.pause = 10;                        // ms before each answer of the classic protocol (tests: 0)
   }
 
   setNames(list) { this.names = [...PORT_NAMES, ...list.map((x) => String(x).trim().toLowerCase()).filter(Boolean)]; }
@@ -204,16 +302,16 @@ export class Updater {
   unwatch() { this.baseline = null; }
 
   // the port names that have an input and an output, whatever they are called (for a list to pick from)
-  ports() { return [...new Set(pairs(this.access).map((p) => p.name))]; }
+  ports() { return [...new Set(pairs(this.access).map((p) => p.name))].filter((n) => !IS_BLUETOOTH(n)); }
 
   // never probe other gear: a usual name, a port the user allowed or that answered a HELLO, or one that appeared during
-  // an update
-  askable(name) { return this.usual(name) || this.allowed.has(name) || (!!this.baseline && !this.baseline.has(name || "")); }
+  // an update; never a Bluetooth MIDI port
+  askable(name) { return !IS_BLUETOOTH(name) && (this.usual(name) || this.allowed.has(name) || (!!this.baseline && !this.baseline.has(name || ""))); }
 
   // FM-1s on ports of any name: the ones that answer the screen reader's HELLO (fm1ports.js askAll; every fm1-base
   // firmware does), allowed from then on -> their port names (also kept in this.answered)
   async answering() {
-    const got = await askAll(this.access, { skip: (n) => this.askable(n) });
+    const got = await askAll(this.access, { skip: (n) => this.askable(n) || IS_BLUETOOTH(n) });
     for (const g of got) { this.allow(g.name); this.answered.add(g.name); }
     return got.map((g) => g.name);
   }
@@ -235,7 +333,7 @@ export class Updater {
   // every in/out pair with the same port name that answers the handshake (only: the port called only)
   async find(filter, only) {
     for (const input of livePorts(this.access.inputs)) {
-      if (only != null ? input.name !== only : !this.askable(input.name)) continue;
+      if (IS_BLUETOOTH(input.name) || (only != null ? input.name !== only : !this.askable(input.name))) continue;
       const output = outputFor(this.access, input);
       if (!output) continue;
       try { await input.open(); await output.open(); } catch (_) { continue; }
@@ -258,8 +356,10 @@ export class Updater {
   }
 
   // serve read requests until the device asks for one of the finish addresses; stops early
-  // when the port disappears (lost: true) instead of waiting out idleMs
-  async serve(link, image, finishAddr, idleMs, onProgress) {
+  // when the port disappears (lost: true) instead of waiting out idleMs. The update loader (opt.loader) may also ask
+  // 4 KiB reads and the sector table (the fast install: one it said yes to, opt.fast, or a fast session it kept) and
+  // say how far it compared (cmd 0x32 -> opt.onCheck(k, n)); onProgress(served, bytes, addr, len)
+  async serve(link, image, finishAddr, idleMs, onProgress, opt = {}) {
     let served = 0, bytes = 0, last = Date.now();
     for (;;) {
       const pkt = await link.read(1000);
@@ -269,21 +369,36 @@ export class Updater {
         continue;
       }
       const r = parseRequest(pkt);
-      if (!r) continue;
+      if (!r) {
+        const f = opt.loader && opt.onCheck ? parseFrame(pkt) : null;
+        if (f && f.cmd === CHECK_CMD && f.body.length === 4) {
+          last = Date.now();
+          opt.onCheck(f.body[0] | (f.body[1] << 8), f.body[2] | (f.body[3] << 8));
+        }
+        continue;
+      }
       last = Date.now();
       if (r.addr === 0xE0000000 || r.addr === 0xF0000000) {
         link.send(response(r.addr, [...new TextEncoder().encode("success"), 0]));
         if (r.addr === finishAddr) return { served, finished: true };
         continue;
       }
-      if (r.len > MAXDATA || r.addr + r.len > image.length) throw fail("badreq", `bad request ${r.addr.toString(16)}+${r.len}`);
-      await sleep(10);
-      if (!link.send(response(r.addr, Array.from(image.subarray(r.addr, r.addr + r.len)), r.fl))) {
+      let data;
+      if (opt.loader && r.addr >= TABLE && r.addr < TABLE_END) {
+        const off = r.addr - TABLE, n = Math.floor(r.len / 6);
+        if (!r.len || r.len % 6 || r.len > FAST_CHUNK || off + n * FAST_CHUNK > image.length) throw fail("badreq", `bad table request ${off.toString(16)}+${r.len}`);
+        data = sectorTable(image, off, n);
+      } else {
+        if (r.len > (opt.loader ? FAST_CHUNK : MAXDATA) || r.addr + r.len > image.length) throw fail("badreq", `bad request ${r.addr.toString(16)}+${r.len}`);
+        data = Array.from(image.subarray(r.addr, r.addr + r.len));
+      }
+      if (!opt.fast && this.pause) await sleep(this.pause);
+      if (!link.send(response(r.addr, data, r.fl))) {
         return { served, finished: false, lost: true };
       }
       served++;
       bytes += r.len;
-      if (onProgress) onProgress(served, bytes);
+      if (onProgress) onProgress(served, bytes, r.addr, r.len);
     }
   }
 
@@ -403,21 +518,39 @@ export class Updater {
     } finally { link.close(); }
   }
 
-  // step 2 with the loader found by find()/waitFor()
+  // step 2 with the loader found by find()/waitFor(): the fast install when the loader answers its hello (not with
+  // this.classic, nor for a package without a Felucca loader), else the classic one. step("write", served, bytes) as
+  // before; in the fast install step("write", served, bytes, pct) with pct the share of the app area compared or
+  // written (0..99, never back), and step("mode", "fast" | "classic") first
   async write(ota, image, step) {
+    const fast = !this.classic && hasLoader(image) && await fastHello(ota.link);
+    step("mode", fast ? "fast" : "classic");
+    let pct = 0, off = null, n = 0;
+    const show = (p, served, bytes) => { if (p > pct) { pct = p; step("write", served, bytes, pct); } };
+    const onRead = (served, bytes, addr, len) => {
+      if (addr >= TABLE && addr < TABLE_END) { off = addr - TABLE; n = Math.floor(len / 6); }
+      else if (off !== null) { if (n && addr >= off) show(Math.min(99, Math.floor(((Math.floor((addr - off) / FAST_CHUNK) + 1) * 100) / n)), served, bytes); }
+      else step("write", served, bytes);
+    };
+    const onCheck = (k, total) => { if (total) show(Math.min(99, Math.floor((k * 100) / total)), 0, 0); };
     ota.link.send(UPGRADE);
-    await sleep(2000);
-    const s2 = await this.serve(ota.link, image, 0xF0000000, 180000, (n, b) => step("write", n, b));
+    await sleep(fast ? 50 : 2000);
+    const s2 = await this.serve(ota.link, image, 0xF0000000, 180000, onRead, { loader: true, fast, onCheck });
     ota.link.close();
     return s2;
   }
 
-  // resume: the device is already in update mode (loader) -> true when the write finished. With the product, the
+  // resume: the device is already in update mode (loader) -> true when the write finished. With the product, a loader of
+  // M-VAVE's own firmware is refused unless the product is M-VAVE's too (foreign), and the
   // FM-1 has to come back running it (as at the end of install)
   async resume(image, onStep, product) {
     const step = onStep || (() => {});
     const ota = await this.find(IS_OTA);
     if (!ota) return false;
+    if (product && !IS_STOCK(product) && IS_MVAVE_LOADER(ota.id)) {
+      ota.link.close();
+      throw fail("foreign", `the FM-1 is in the update mode of M-VAVE's own firmware (${ota.id.text}) and this package is not for it: nothing was written`, ota.id.text);
+    }
     this.watch();
     try {
       if (!(await this.write(ota, image, step)).finished) return false;

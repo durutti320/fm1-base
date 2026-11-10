@@ -27,7 +27,7 @@ const m = /\/\/ --- backup protocol: begin[^\n]*\n([\s\S]*?)\/\/ --- backup prot
 if (!m) { console.log("FAIL no backup protocol markers in web/backup/index.html"); process.exit(1); }
 if (unfilled) { console.log(`FAIL web/backup/index.html: ${unfilled.join(" ")}, not make_site.py's`); process.exit(1); }
 const PB = new Function(`"use strict";\n${m[1]}\nreturn PB;`)();
-Object.assign(PB.DELAY, { poll: 5, idle: 300, ask: 500, first: 300, hs: 100 });
+Object.assign(PB.DELAY, { poll: 5, idle: 300, ask: 500, first: 300, hs: 100, hsFull: 100 });
 
 let fails = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fails++; };
@@ -143,9 +143,19 @@ class FakeFM1 {                                                // its app's magi
     this.ask(...r.value);
   }
   rx(d) {
+    // newOta: chip/ota.c from M-UPGRADE 3.11's fix on, NAME_ and three digits to HS_QUERY, the whole to HS_FULL
+    const reply = (text) => {
+      const t = [...Buffer.from(text), ...new Array(27 - text.length).fill(0)];
+      t[24] = 0xB3, t[25] = 0x60, t[26] = 0x14;                  // felucca-bsp#29: the flash's JEDEC id after the text
+      this.q.push([0xF0, ...PB.pack7([0, 0x59, 0x11, 27, 0, 0, ...t, ~t.reduce((a, v) => a + v, 0) & 255]), 0xF7]);
+    };
     if (same(d, PB.HS_QUERY)) {
-      const t = [...Buffer.from(this.identity)];
-      this.q.push([0xF0, ...PB.pack7([0, 0x59, 0x11, 0, 0, 0, ...t, ...new Array(28 - t.length).fill(0)]), 0xF7]);
+      reply(this.newOta ? this.identity.slice(0, this.identity.indexOf("_") + 4) : this.identity);
+      return;
+    }
+    if (same(d, PB.HS_FULL)) {
+      this.hsFull = (this.hsFull || 0) + 1;
+      if (this.newOta) reply(this.identity);
       return;
     }
     const f = PB.parseFrame(d);
@@ -229,6 +239,13 @@ const resealed = (b) => {                                      // its CRCs right
   check(e && e.code === "model" && /not Template/.test(e.message), "another firmware on the FM-1 (X0X's identity): refused");
 }
 {
+  const dev = new FakeFM1(img, { identity: "FM-1_11000300", newOta: true });
+  const c = await connect(dev);
+  check(c && c.id === "FM-1_11000300" && dev.hsFull === 1,
+        "a firmware that answers FM-1_110 to the plain query (M-UPGRADE 3.11): its whole identity asked with 01");
+  c.link.close();
+}
+{
   const dev = new FakeFM1(other, { stallAfter: 5 });
   const e = await err(PB.restore((await connect(dev)).link, img));
   check(e && e.code === "stopped" && same(dev.image, other), "the FM-1 stops asking: stopped, nothing changed");
@@ -281,6 +298,31 @@ const resealed = (b) => {                                      // its CRCs right
   const got = await PB.find(acc, (i) => { linked.push(i.name); return dev; });
   check(got && got.name === "Arturia KeyStep" && linked.join() === "Arturia KeyStep", "an FM-1 answering HELLO on another device's port: found, and only it asked");
   check(iac.sent.length === 3 && other.sent.length === 3 && fm1.sent.length === 1, "  the loopback and the other gear: three HELLOs, nothing more");
+}
+{
+  // a Bluetooth MIDI port (an FM-1 paired beside its USB cable) is never asked, allowed, tried or listed
+  const dev = new FakeFM1(img);
+  const port = (name) => ({ name, state: "connected", open: async () => {} });
+  const acc = { inputs: new Map([["i", port("Optimist 112D Bluetooth")], ["j", port("FM-1")]]),
+                outputs: new Map([["o", port("Optimist 112D Bluetooth")], ["p", port("FM-1")]]) };
+  const asked = [];
+  const got = await PB.find(acc, (i) => { asked.push(i.name); return dev; }, ["Optimist 112D Bluetooth"]);
+  check(got && got.name === "FM-1" && !asked.includes("Optimist 112D Bluetooth"), "Bluetooth port: skipped, the USB port is found");
+  check(!PB.others(acc, []).length, "Bluetooth port: not listed for Try");
+  const only = { inputs: new Map([["i", port("Optimist 112D Bluetooth")]]), outputs: new Map([["o", port("Optimist 112D Bluetooth")]]) };
+  const e = await err(PB.find(only, (i) => { asked.push(i.name); return dev; }, ["Optimist 112D Bluetooth"], "Optimist 112D Bluetooth"));
+  check(e && e.code === "notfound" && !asked.includes("Optimist 112D Bluetooth"), "Bluetooth port: not even Try asks it");
+}
+{
+  // an FM-1 under the name of a firmware of the family (Optimist, SLOOP, Melodee, LOOM-8) is asked by itself
+  for (const name of ["Optimist", "SLOOP 2.4", "Melodee", "LOOM-8"]) {
+    const dev = new FakeFM1(img);
+    const port = (n) => ({ name: n, state: "connected", open: async () => {} });
+    const acc = { inputs: new Map([["i", port("Launchkey Mini")], ["j", port(name)]]), outputs: new Map([["o", port("Launchkey Mini")], ["p", port(name)]]) };
+    const asked = [];
+    const got = await PB.find(acc, (i) => { asked.push(i.name); return dev; });
+    check(got && got.name === name && !asked.includes("Launchkey Mini") && !PB.others(acc).includes(name), `family port "${name}": asked by itself, other gear not`);
+  }
 }
 {
   // the firmware's own sections after the backup (EXTRAS): the page's join and split against fm1_backup.py's
