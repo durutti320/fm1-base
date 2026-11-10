@@ -34,7 +34,7 @@ void plat_lights(uint32_t buttons, uint32_t keys, uint32_t dim_buttons, uint32_t
     {   /* the mirror's view, as on the FM-1: PLAY lit (either LED), and bit 15 PLAY lit red */
         uint32_t lit = buttons & ((1u << NB) - 1u);
         mirror_leds((lit & ~play) | (buttons & (play | LED_PLAY_GREEN) ? play : 0u) | (buttons & play ? 1u << 15 : 0u),
-                    keys);
+                    keys, 0u, 0u);                    /* (no dimmed lights on the SMK-37's panel) */
     }
 }
 void plat_smk_leds(uint32_t lit) { smk_own_lit = lit & ((1u << NSB) - 1u); }
