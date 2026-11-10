@@ -59,7 +59,9 @@ static void smk_pad_event(uint32_t pad, uint32_t vel);
 #include "fm1_timer.h"
 #include "fm1_audio.h"
 #include "fm1_adc.h"
+#if !BOARD_SMK37                    /* (the SMK-37: no jack switch known; PB5 is not read there) */
 #include "fm1_jack.h"               /* the headphone jack's switch (PB5): plat_headphones */
+#endif
 #include "fm1_lcd_hw.h"
 #if FM1B_WIFI || FM1B_BLE
 #define FL_UID 1                          /* the flash's unique ID: the WiFi MAC, the Bluetooth name (plat_chip_uid) */
@@ -168,6 +170,9 @@ static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIME
 #ifndef FM1B_HEADPHONES
 #define FM1B_HEADPHONES 0         /* 1: the headphone jack read every main-loop pass (fm1.toml headphones = true;
                                    * plat_headphones); 0: not read, plat_headphones -1 */
+#endif
+#if BOARD_SMK37 && FM1B_HEADPHONES
+#error "the SMK-37: headphones = true reads the FM-1's jack switch (PB5), not known on the SMK-37"
 #endif
 #if defined APP_USB_HOST_NAME && FM1B_USB_HOST
 #define FELUCCA_USB_HOST_NAME 1      /* the device's product string (plat_usb_host_name) */
