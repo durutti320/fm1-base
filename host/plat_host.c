@@ -1333,8 +1333,8 @@ static void hcr_boot(void)                          /* main_fm1.c fm1_main's: a 
 #define DS_LAYOUT 0
 #endif
 #include "dbgstats.c"
-#define HDS_OTA_AREA 0xE0000u                       /* ota.c's OTA_AREA and OTA_RES (0xE4F00) */
-#define HDS_OTA_RES 0xE4F00u
+#define HDS_OTA_AREA PLAT_STAGE_LO                       /* ota.c's OTA_AREA and OTA_RES (0xE4F00) */
+#define HDS_OTA_RES (PLAT_STAGE_LO + 0x4F00u)
 static int ds_in(uint32_t off, uint32_t n) { return off >= DS_LO && n <= DS_SLOTS * DS_REC - (off - DS_LO); }
 static int ds_read(uint32_t off, void *dst, uint32_t n)
 {

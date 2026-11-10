@@ -410,6 +410,7 @@ void plat_log(const char *line);
 #define PLAT_XDATA0_HI 0xEA000u
 #define PLAT_XDATA1_LO 0xEB000u
 #define PLAT_XDATA1_HI 0xF4000u
+#define PLAT_STAGE_LO 0xBB000u             /* the update's staging (felucca-bsp FL_OTA: 5 sectors, its record in the last) */
 #else
 #define PLAT_DATA_LO 0x97000u
 #define PLAT_DATA_HI 0xE0000u
@@ -417,6 +418,7 @@ void plat_log(const char *line);
 #define PLAT_XDATA0_HI 0x97000u
 #define PLAT_XDATA1_LO 0xE5000u
 #define PLAT_XDATA1_HI 0xFC000u
+#define PLAT_STAGE_LO 0xE0000u             /* the update's staging (felucca-bsp FL_OTA: 5 sectors, its record in the last) */
 #define PLAT_XDATA2_LO 0xFC000u
 #define PLAT_XDATA2_HI 0xFF000u
 #endif

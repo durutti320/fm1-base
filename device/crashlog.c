@@ -21,7 +21,7 @@
  *   cl_read(off, dst, n)   cl_erase(off) (4 KiB)   cl_prog(off, src, n) (bits 1 to 0, within a 256-byte page)
  *   cl_send(frame, n)      one F0 .. F7 frame to the computer */
 #define CL_MAGIC 0x31484C43u                        /* "CLH1" */
-#define CL_LO 0x000E2000u                           /* the ring's first sector (the staging area's 3rd) */
+#define CL_LO (PLAT_STAGE_LO + 0x2000u)                        /* the ring's first sector (the staging area's 3rd) */
 #define CL_SECTORS 2u
 #define CL_REC 128u                                 /* bytes a record: two to a 256-byte page, never across one */
 #define CL_SLOTS (0xF00u / CL_REC)                  /* 30 a sector: 0xF00..0xFFF erased (the loader's record scan) */
@@ -50,9 +50,9 @@ static int32_t cl_stk_left(uint32_t flags, uint32_t k)   /* bytes (a multiple of
 #if !defined PLAT_DATA_HI || !defined PLAT_XDATA1_LO
 #error "crashlog.c: plat.h first"
 #endif
-_Static_assert(CL_LO >= PLAT_DATA_HI && CL_LO + CL_SECTORS * 0x1000u <= PLAT_XDATA1_LO - 0x1000u,
+_Static_assert(CL_LO >= PLAT_DATA_HI && CL_LO + CL_SECTORS * 0x1000u <= PLAT_STAGE_LO + 0x4000u,
                "the crash history: inside the update's staging (0xE0000..0xE4FFF), off its record's sector 0xE4000");
-_Static_assert(CL_LO >= 0xE2000u, "the crash history: off backup.c's journal (0xE1000) and the staged loader's head");
+_Static_assert(CL_LO >= PLAT_STAGE_LO + 0x2000u, "the crash history: off backup.c's journal (0xE1000) and the staged loader's head");
 
 typedef struct {
     uint32_t magic;                                 /* CL_MAGIC, programmed last: the commit */

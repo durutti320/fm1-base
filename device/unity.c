@@ -162,6 +162,9 @@ static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIME
 #define FM1B_DBGSTATS 0           /* 1: the debug stats in flash, 0xE4000..0xE4EFF (fm1.toml debug_stats = true:
                                    * dbgstats.c; with FM1B_CRASHLOG) */
 #endif
+#if BOARD_SMK37 && (FM1B_CRASHLOG || FM1B_DBGSTATS)
+#error "the SMK-37: crash_history and debug_stats are not tried on a unit yet (they would write its staging, 0xBD000..0xBFEFF)"
+#endif
 #ifndef FM1B_HEADPHONES
 #define FM1B_HEADPHONES 0         /* 1: the headphone jack read every main-loop pass (fm1.toml headphones = true;
                                    * plat_headphones); 0: not read, plat_headphones -1 */
