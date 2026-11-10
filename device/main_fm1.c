@@ -706,6 +706,8 @@ static int log_frame(const uint8_t *p, uint32_t n)
         for (i = 0; i < 12u; i++) {
             const char *l = L[i];
             uint32_t v = i == 9u ? uac.fill_lo : now[i] - last[i], d = 0;
+            if (v > 9999999u)                          /* (seven digits: the longest line fits b) */
+                v = 9999999u;
             char t[10];
             if (i % 3u == 0u)
                 q = b;
@@ -720,7 +722,7 @@ static int log_frame(const uint8_t *p, uint32_t n)
             if (i == 9u) {                           /* the fill: lo..hi */
                 *q++ = '.';
                 *q++ = '.';
-                for (v = uac.fill_hi, d = 0; d == 0u || v; v /= 10u)
+                for (v = uac.fill_hi > 9999999u ? 9999999u : uac.fill_hi, d = 0; d == 0u || v; v /= 10u)
                     t[d++] = (char)('0' + v % 10u);
                 while (d)
                     *q++ = t[--d];
